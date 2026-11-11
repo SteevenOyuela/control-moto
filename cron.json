@@ -1,0 +1,8 @@
+[
+  {
+    "name": "daily-reminders",
+    "cron": "0 7 * * *",
+    "handler": "dailyReminders",
+    "timezone": "America/Bogota"
+  }
+]

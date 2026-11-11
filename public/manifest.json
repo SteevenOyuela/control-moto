@@ -1,0 +1,14 @@
+{
+  "name": "Control Moto",
+  "short_name": "Control Moto",
+  "description": "SOAT, tecnomecánica, mantenimientos y gasolina de tu moto.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#dc2626",
+  "lang": "es-CO",
+  "icons": [
+    { "src": "/resources/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

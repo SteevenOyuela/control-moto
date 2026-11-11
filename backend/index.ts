@@ -1,0 +1,861 @@
+import {
+    router,
+    json,
+    error,
+    requireAuth,
+    db,
+    notifications,
+    isAppDatabaseError,
+} from '@appdeploy/sdk';
+import type { RouterContext } from '@appdeploy/sdk';
+
+// ---------------------------------------------------------------------------
+// Tipos
+// ---------------------------------------------------------------------------
+
+type Profile = {
+    userId: string;
+    brand: string;
+    model: string;
+    cc: number;
+    plate: string;
+    year: number;
+    matriculaDate: string;
+    currentKm: number;
+    currentKmDate: string;
+    avaluo: number;
+    city: string;
+    createdAt: string;
+};
+
+type Doc = {
+    type: string;
+    name: string;
+    expiry: string;
+    notes?: string;
+    notified?: string[];
+};
+
+type MaintItem = {
+    name: string;
+    category: string;
+    intervalKm: number;
+    intervalDays: number;
+    lastKm: number;
+    lastDate: string;
+    notes?: string;
+    notifiedFor?: string;
+};
+
+type Service = {
+    itemId: string;
+    itemName: string;
+    km: number;
+    date: string;
+    cost: number;
+    notes?: string;
+};
+
+type Fuel = {
+    date: string;
+    km: number;
+    gallons: number;
+    total: number;
+    fullTank: boolean;
+};
+
+type Odo = { date: string; km: number; source: string };
+
+type Status = 'ok' | 'pronto' | 'urgente' | 'vencido';
+
+type WithId<T> = T & { id: string };
+
+// ---------------------------------------------------------------------------
+// Constantes
+// ---------------------------------------------------------------------------
+
+const TZ = 'America/Bogota';
+const LITERS_PER_GALLON = 3.78541;
+const DOC_TYPES = ['SOAT', 'RTM', 'LICENCIA', 'IMPUESTO', 'OTRO'];
+const DOC_LABELS: Record<string, string> = {
+    SOAT: 'SOAT',
+    RTM: 'Revisión técnico-mecánica',
+    LICENCIA: 'Licencia de conducción',
+    IMPUESTO: 'Impuesto vehicular',
+    OTRO: 'Documento',
+};
+
+// Intervalos de referencia para Hero Hunk 160R 4V (refrigerada por aire/aceite).
+// El usuario puede ajustarlos desde la app.
+const DEFAULT_ITEMS: Array<Pick<MaintItem, 'name' | 'category' | 'intervalKm' | 'intervalDays'>> = [
+    { name: 'Aceite de motor', category: 'Fluidos', intervalKm: 3000, intervalDays: 180 },
+    { name: 'Líquido de frenos', category: 'Fluidos', intervalKm: 20000, intervalDays: 730 },
+    { name: 'Filtro de aceite', category: 'Filtros y bujía', intervalKm: 6000, intervalDays: 365 },
+    { name: 'Limpieza filtro de aire', category: 'Filtros y bujía', intervalKm: 3000, intervalDays: 0 },
+    { name: 'Cambio filtro de aire', category: 'Filtros y bujía', intervalKm: 12000, intervalDays: 0 },
+    { name: 'Bujía', category: 'Filtros y bujía', intervalKm: 12000, intervalDays: 0 },
+    { name: 'Lubricar y tensionar cadena', category: 'Kit de arrastre', intervalKm: 500, intervalDays: 15 },
+    { name: 'Kit de arrastre (cadena, piñón y corona)', category: 'Kit de arrastre', intervalKm: 18000, intervalDays: 0 },
+    { name: 'Pastillas de freno delanteras', category: 'Frenos y llantas', intervalKm: 3000, intervalDays: 0 },
+    { name: 'Pastillas / bandas traseras', category: 'Frenos y llantas', intervalKm: 3000, intervalDays: 0 },
+    { name: 'Presión de llantas', category: 'Frenos y llantas', intervalKm: 0, intervalDays: 15 },
+    { name: 'Desgaste de llantas', category: 'Frenos y llantas', intervalKm: 5000, intervalDays: 0 },
+    { name: 'Limpieza de cuerpo de aceleración e inyector', category: 'Sincronización', intervalKm: 12000, intervalDays: 0 },
+    { name: 'Calibración de válvulas', category: 'Sincronización', intervalKm: 12000, intervalDays: 0 },
+];
+
+// ---------------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------------
+
+function userKey(userId: string): string {
+    const k = userId.replace(/[^A-Za-z0-9]/g, '').toLowerCase().slice(0, 64);
+    return k || 'anon';
+}
+
+function tbl(base: string, key: string): string {
+    return `${base}_${key}`;
+}
+
+function today(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: TZ,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(new Date());
+}
+
+function isDate(v: unknown): v is string {
+    if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+    return !Number.isNaN(dayNum(v));
+}
+
+function dayNum(d: string): number {
+    const [y, m, dd] = d.split('-').map(Number);
+    return Math.floor(Date.UTC(y, m - 1, dd) / 86400000);
+}
+
+function addDays(d: string, n: number): string {
+    return new Date((dayNum(d) + n) * 86400000).toISOString().slice(0, 10);
+}
+
+function addYears(d: string, n: number): string {
+    const [y, m, dd] = d.split('-');
+    const day = m === '02' && dd === '29' ? '28' : dd;
+    return `${Number(y) + n}-${m}-${day}`;
+}
+
+function num(v: unknown): number | null {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) ? n : null;
+}
+
+function str(v: unknown, max = 120): string {
+    return typeof v === 'string' ? v.trim().slice(0, max) : '';
+}
+
+function bodyOf(ctx: RouterContext): Record<string, unknown> {
+    const b = ctx.body;
+    return b && typeof b === 'object' ? (b as Record<string, unknown>) : {};
+}
+
+function keyOf(ctx: RouterContext): string {
+    return userKey(ctx.user!.userId);
+}
+
+function isQuota(e: unknown): boolean {
+    return isAppDatabaseError(e) && e.code === 'AppDatabaseQuotaExceeded';
+}
+
+async function listAll<T>(table: string): Promise<Array<WithId<T>>> {
+    const out: Array<WithId<T>> = [];
+    let token: string | undefined;
+    try {
+        for (let i = 0; i < 5; i++) {
+            const page = await db.list<T>(table, { limit: 200, nextToken: token });
+            out.push(...(page.items as unknown as Array<WithId<T>>));
+            token = page.nextToken;
+            if (!token) break;
+        }
+    } catch (e) {
+        if (isQuota(e)) throw e;
+        console.warn('list failed', table, e);
+    }
+    return out;
+}
+
+async function getOne<T>(table: string, id: string): Promise<T | null> {
+    try {
+        const [item] = await db.get<T>(table, [id], { consistent: true });
+        return item ?? null;
+    } catch (e) {
+        if (isQuota(e)) throw e;
+        console.warn('get failed', table, e);
+        return null;
+    }
+}
+
+function estimateRtm(matricula: string, t: string): string {
+    // Motos: primera revisión a los 2 años de la matrícula, luego cada año.
+    let d = addYears(matricula, 2);
+    let guard = 0;
+    while (dayNum(d) < dayNum(t) && guard < 60) {
+        d = addYears(d, 1);
+        guard++;
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// Lógica de negocio
+// ---------------------------------------------------------------------------
+
+/**
+ * Promedio diario de recorrido con mínimos cuadrados ponderados.
+ * Los registros recientes pesan más (vida media de 30 días), así la predicción
+ * se adapta si cambias tu rutina.
+ */
+function dailyRate(points: Array<{ date: string; km: number }>, t: string): number | null {
+    const t0 = dayNum(t);
+    const valid = points.filter((p) => isDate(p.date) && Number.isFinite(p.km));
+    let pts = valid.filter((p) => t0 - dayNum(p.date) <= 120);
+    if (pts.length < 2) pts = valid;
+    if (pts.length < 2) return null;
+    const xs = pts.map((p) => dayNum(p.date) - t0);
+    if (Math.max(...xs) - Math.min(...xs) < 1) return null;
+    let sw = 0;
+    let sx = 0;
+    let sy = 0;
+    let sxx = 0;
+    let sxy = 0;
+    pts.forEach((p, i) => {
+        const x = xs[i];
+        const w = Math.pow(0.5, Math.max(0, -x) / 30);
+        sw += w;
+        sx += w * x;
+        sy += w * p.km;
+        sxx += w * x * x;
+        sxy += w * x * p.km;
+    });
+    const den = sw * sxx - sx * sx;
+    if (den <= 0) return null;
+    const slope = (sw * sxy - sx * sy) / den;
+    if (!Number.isFinite(slope) || slope <= 0 || slope > 1500) return null;
+    return slope;
+}
+
+function docStatus(daysLeft: number): Status {
+    if (daysLeft < 0) return 'vencido';
+    if (daysLeft <= 5) return 'urgente';
+    if (daysLeft <= 15) return 'pronto';
+    return 'ok';
+}
+
+function computeItem(item: WithId<MaintItem>, p: Profile, rate: number | null, t: string) {
+    const lastDate = isDate(item.lastDate) ? item.lastDate : p.createdAt;
+    const kmDue = item.intervalKm > 0 ? item.lastKm + item.intervalKm : null;
+    const kmLeft = kmDue !== null ? kmDue - p.currentKm : null;
+    const timeDue = item.intervalDays > 0 ? addDays(lastDate, item.intervalDays) : null;
+    let kmDate: string | null = null;
+    if (kmLeft !== null && rate) {
+        kmDate = addDays(p.currentKmDate, Math.max(0, Math.ceil(kmLeft / rate)));
+    }
+    const candidates = [kmDate, timeDue].filter((d): d is string => d !== null);
+    const dueDate = candidates.length
+        ? candidates.reduce((a, b) => (dayNum(a) <= dayNum(b) ? a : b))
+        : null;
+    const daysLeft = dueDate ? dayNum(dueDate) - dayNum(t) : null;
+
+    let progress = 0;
+    if (item.intervalKm > 0) progress = (p.currentKm - item.lastKm) / item.intervalKm;
+    if (item.intervalDays > 0) {
+        progress = Math.max(progress, (dayNum(t) - dayNum(lastDate)) / item.intervalDays);
+    }
+    progress = Math.max(0, Math.min(1.2, progress));
+
+    let status: Status = 'ok';
+    if (progress >= 1) status = 'vencido';
+    else if (progress >= 0.85 || (daysLeft !== null && daysLeft <= 7)) status = 'pronto';
+
+    return {
+        ...item,
+        lastDate,
+        kmDue,
+        kmLeft,
+        timeDue,
+        dueDate,
+        daysLeft,
+        progress,
+        status,
+    };
+}
+
+function fuelStats(fuel: Array<WithId<Fuel>>) {
+    const sorted = [...fuel].sort((a, b) => a.km - b.km || dayNum(a.date) - dayNum(b.date));
+    const perEntry: Record<string, number> = {};
+    let lastFull = -1;
+    let gal = 0;
+    let cost = 0;
+    let totKm = 0;
+    let totGal = 0;
+    let totCost = 0;
+    let lastKmPerGal: number | null = null;
+    sorted.forEach((f, i) => {
+        if (lastFull >= 0) {
+            gal += f.gallons;
+            cost += f.total;
+        }
+        if (f.fullTank) {
+            if (lastFull >= 0) {
+                const km = f.km - sorted[lastFull].km;
+                if (km > 0 && gal > 0) {
+                    perEntry[f.id] = km / gal;
+                    lastKmPerGal = km / gal;
+                    totKm += km;
+                    totGal += gal;
+                    totCost += cost;
+                }
+            }
+            lastFull = i;
+            gal = 0;
+            cost = 0;
+        }
+    });
+    const allGal = fuel.reduce((s, f) => s + f.gallons, 0);
+    const allSpent = fuel.reduce((s, f) => s + f.total, 0);
+    const avgKmPerGal = totGal > 0 ? totKm / totGal : null;
+    return {
+        perEntry,
+        stats: {
+            avgKmPerGal,
+            avgKmPerL: avgKmPerGal !== null ? avgKmPerGal / LITERS_PER_GALLON : null,
+            costPerKm: totKm > 0 ? totCost / totKm : null,
+            lastKmPerGal,
+            totalSpent: allSpent,
+            totalGallons: allGal,
+            avgPricePerGallon: allGal > 0 ? allSpent / allGal : null,
+        },
+    };
+}
+
+function taxInfo(p: Profile) {
+    if (p.cc > 125) {
+        return {
+            regime: 'impuesto',
+            title: 'Impuesto vehicular (departamental)',
+            detail:
+                'Las motos de más de 125 cc pagan impuesto vehicular cada año. La tarifa es el 1,5 % del avalúo comercial que publica el Ministerio de Transporte (Ley 488 de 1998, art. 145). La fecha límite la fija cada departamento.',
+            estimate: p.avaluo > 0 ? Math.round(p.avaluo * 0.015) : null,
+            license: 'A2',
+            licenseDetail: 'Para motos de más de 125 cc necesitas licencia categoría A2.',
+        };
+    }
+    return {
+        regime: 'semaforizacion',
+        title: 'Derechos de semaforización (municipal)',
+        detail:
+            'Las motos de 125 cc o menos no pagan impuesto vehicular. En algunos municipios pagan derechos de semaforización; el valor lo fija cada municipio.',
+        estimate: null,
+        license: 'A1',
+        licenseDetail: 'Para motos de hasta 125 cc basta la licencia categoría A1.',
+    };
+}
+
+const STATUS_ORDER: Record<Status, number> = { vencido: 0, urgente: 1, pronto: 2, ok: 3 };
+
+async function buildDashboard(key: string, profile: Profile) {
+    const t = today();
+    const [docs, items, services, fuel, odo] = await Promise.all([
+        listAll<Doc>(tbl('docs', key)),
+        listAll<MaintItem>(tbl('maint', key)),
+        listAll<Service>(tbl('service', key)),
+        listAll<Fuel>(tbl('fuel', key)),
+        listAll<Odo>(tbl('odo', key)),
+    ]);
+    const rate = dailyRate(odo, t);
+    const estimatedKmToday = rate
+        ? Math.round(profile.currentKm + rate * Math.max(0, dayNum(t) - dayNum(profile.currentKmDate)))
+        : null;
+
+    const docViews = docs
+        .filter((d) => isDate(d.expiry))
+        .map((d) => {
+            const daysLeft = dayNum(d.expiry) - dayNum(t);
+            return {
+                id: d.id,
+                type: d.type,
+                name: d.name,
+                expiry: d.expiry,
+                notes: d.notes ?? '',
+                daysLeft,
+                status: docStatus(daysLeft),
+            };
+        })
+        .sort((a, b) => a.daysLeft - b.daysLeft);
+
+    const itemViews = items
+        .map((i) => {
+            const c = computeItem(i, profile, rate, t);
+            return {
+                id: c.id,
+                name: c.name,
+                category: c.category,
+                intervalKm: c.intervalKm,
+                intervalDays: c.intervalDays,
+                lastKm: c.lastKm,
+                lastDate: c.lastDate,
+                notes: c.notes ?? '',
+                kmDue: c.kmDue,
+                kmLeft: c.kmLeft,
+                dueDate: c.dueDate,
+                daysLeft: c.daysLeft,
+                progress: c.progress,
+                status: c.status,
+            };
+        })
+        .sort(
+            (a, b) =>
+                STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+                (a.daysLeft ?? 99999) - (b.daysLeft ?? 99999) ||
+                b.progress - a.progress,
+        );
+
+    const fs = fuelStats(fuel);
+    const fuelViews = [...fuel]
+        .sort((a, b) => b.km - a.km || dayNum(b.date) - dayNum(a.date))
+        .map((f) => ({ ...f, kmPerGal: fs.perEntry[f.id] ?? null }));
+
+    const serviceViews = [...services]
+        .sort((a, b) => dayNum(b.date) - dayNum(a.date) || b.km - a.km)
+        .slice(0, 50);
+
+    return {
+        profile,
+        today: t,
+        rate,
+        estimatedKmToday,
+        rtmSuggested: isDate(profile.matriculaDate) ? estimateRtm(profile.matriculaDate, t) : null,
+        tax: taxInfo(profile),
+        docs: docViews,
+        items: itemViews,
+        services: serviceViews,
+        fuel: fuelViews,
+        fuelStats: fs.stats,
+    };
+}
+
+async function dashboardResponse(key: string) {
+    const p = await getOne<Profile>('profiles', key);
+    if (!p) return json({ profile: null, today: today() });
+    return json(await buildDashboard(key, p));
+}
+
+/** Registra una lectura del odómetro y sube el km actual si es mayor. */
+async function recordKm(key: string, profile: Profile, km: number, date: string, source: string) {
+    await db.add(tbl('odo', key), [{ date, km, source }]);
+    if (km > profile.currentKm) {
+        const newDate = dayNum(date) >= dayNum(profile.currentKmDate) ? date : profile.currentKmDate;
+        await db.tx.update('profiles', [{ id: key, record: { currentKm: km, currentKmDate: newDate } }], {
+            patch: true,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recordatorios (cron diario + manual)
+// ---------------------------------------------------------------------------
+
+async function remindUser(key: string, profile: Profile): Promise<string[]> {
+    const dash = await buildDashboard(key, profile);
+    const messages: string[] = [];
+
+    const docsRaw = await listAll<Doc>(tbl('docs', key));
+    for (const d of dash.docs) {
+        let level: string | null = null;
+        if (d.daysLeft < 0) level = 'vencido';
+        else if (d.daysLeft <= 1) level = 'd1';
+        else if (d.daysLeft <= 5) level = 'd5';
+        else if (d.daysLeft <= 15) level = 'd15';
+        if (!level) continue;
+        const raw = docsRaw.find((r) => r.id === d.id);
+        const notified = raw?.notified ?? [];
+        const mark = `${d.expiry}:${level}`;
+        if (notified.includes(mark)) continue;
+        let when = `vence en ${d.daysLeft} días`;
+        if (d.daysLeft < 0) when = `está VENCIDO desde hace ${-d.daysLeft} día(s)`;
+        else if (d.daysLeft === 0) when = 'vence HOY';
+        else if (d.daysLeft === 1) when = 'vence mañana';
+        messages.push(`${d.name} ${when}.`);
+        await db.tx.update(tbl('docs', key), [{ id: d.id, record: { notified: [...notified, mark] } }], {
+            patch: true,
+        });
+    }
+
+    const itemsRaw = await listAll<MaintItem>(tbl('maint', key));
+    for (const it of dash.items) {
+        if (it.status === 'ok') continue;
+        const raw = itemsRaw.find((r) => r.id === it.id);
+        const mark = `${it.lastKm}|${it.lastDate}|${it.status}`;
+        if (raw?.notifiedFor === mark) continue;
+        let detail = '';
+        if (it.kmLeft !== null) {
+            detail = it.kmLeft > 0 ? `faltan ${Math.round(it.kmLeft)} km` : `pasado por ${Math.round(-it.kmLeft)} km`;
+        }
+        if (it.dueDate) detail += `${detail ? ', ' : ''}fecha estimada ${it.dueDate}`;
+        messages.push(`${it.name}: ${it.status === 'vencido' ? 'toca ya' : 'se acerca'}${detail ? ` (${detail})` : ''}.`);
+        await db.tx.update(tbl('maint', key), [{ id: it.id, record: { notifiedFor: mark } }], { patch: true });
+    }
+
+    if (messages.length > 0) {
+        const title =
+            messages.length === 1 ? `Tu ${profile.model || 'moto'}` : `${messages.length} recordatorios para tu moto`;
+        await notifications.send({
+            userIds: [profile.userId],
+            notification: { title, body: messages.join('\n').slice(0, 900) },
+            data: { kind: 'reminder' },
+            ttlSeconds: 86400,
+        });
+    }
+    return messages;
+}
+
+export const dailyReminders = async () => {
+    let token: string | undefined;
+    for (let page = 0; page < 10; page++) {
+        let res: { items: Array<Profile & { id: string }>; nextToken?: string };
+        try {
+            res = (await db.list<Profile>('profiles', { limit: 50, nextToken: token })) as unknown as {
+                items: Array<Profile & { id: string }>;
+                nextToken?: string;
+            };
+        } catch (e) {
+            console.error('cron list profiles failed', e);
+            break;
+        }
+        for (const p of res.items) {
+            try {
+                await remindUser(p.id, p);
+            } catch (e) {
+                console.error('remind failed', p.id, e);
+            }
+        }
+        token = res.nextToken;
+        if (!token) break;
+    }
+    return { statusCode: 200 };
+};
+
+// ---------------------------------------------------------------------------
+// Rutas
+// ---------------------------------------------------------------------------
+
+export const handler = router({
+    'GET /api/_healthcheck': [async () => json({ message: 'Success' })],
+
+    'GET /api/dashboard': [requireAuth(), async (ctx) => dashboardResponse(keyOf(ctx))],
+
+    'PUT /api/profile': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const cc = num(b.cc);
+            const currentKm = num(b.currentKm);
+            const year = num(b.year);
+            const avaluo = num(b.avaluo) ?? 0;
+            if (cc === null || cc <= 0 || cc > 2500) return error('El cilindraje no es válido.', 400);
+            if (currentKm === null || currentKm < 0) return error('El kilometraje no es válido.', 400);
+            if (!isDate(b.matriculaDate)) return error('La fecha de matrícula no es válida.', 400);
+            const t = today();
+            const fields = {
+                brand: str(b.brand, 40) || 'Hero',
+                model: str(b.model, 60) || 'Hunk 160R 4V',
+                cc,
+                plate: str(b.plate, 10).toUpperCase(),
+                year: year ?? 0,
+                matriculaDate: b.matriculaDate,
+                avaluo: Math.max(0, avaluo),
+                city: str(b.city, 60),
+            };
+
+            const existing = await getOne<Profile>('profiles', key);
+            if (existing) {
+                const record: Record<string, unknown> = { ...fields };
+                if (currentKm !== existing.currentKm) {
+                    record.currentKm = currentKm;
+                    record.currentKmDate = t;
+                    await db.add(tbl('odo', key), [{ date: t, km: currentKm, source: 'ajuste' }]);
+                }
+                await db.tx.update('profiles', [{ id: key, record }], { patch: true });
+                return dashboardResponse(key);
+            }
+
+            const profile: Profile = {
+                userId: ctx.user!.userId,
+                ...fields,
+                currentKm,
+                currentKmDate: t,
+                createdAt: t,
+            };
+            await db.tx.add('profiles', [{ id: key, ...profile }]);
+            await db.add(
+                tbl('maint', key),
+                DEFAULT_ITEMS.map((i) => ({ ...i, lastKm: currentKm, lastDate: t })),
+            );
+            await db.add(tbl('odo', key), [{ date: t, km: currentKm, source: 'registro' }]);
+
+            const docs: Doc[] = [];
+            if (isDate(b.soatExpiry)) docs.push({ type: 'SOAT', name: 'SOAT', expiry: b.soatExpiry, notified: [] });
+            docs.push({
+                type: 'RTM',
+                name: DOC_LABELS.RTM,
+                expiry: estimateRtm(fields.matriculaDate, t),
+                notes: 'Fecha estimada (2 años desde la matrícula y luego cada año). Ajústala con tu certificado.',
+                notified: [],
+            });
+            if (isDate(b.licenseExpiry)) {
+                docs.push({ type: 'LICENCIA', name: DOC_LABELS.LICENCIA, expiry: b.licenseExpiry, notified: [] });
+            }
+            if (isDate(b.taxDue)) {
+                docs.push({ type: 'IMPUESTO', name: DOC_LABELS.IMPUESTO, expiry: b.taxDue, notified: [] });
+            }
+            await db.add(tbl('docs', key), docs);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/odometer': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const km = num(b.km);
+            const date = isDate(b.date) ? b.date : today();
+            if (km === null || km < 0) return error('Escribe un kilometraje válido.', 400);
+            if (km < p.currentKm) {
+                return error(
+                    `El kilometraje no puede ser menor al último registrado (${Math.round(p.currentKm)} km).`,
+                    400,
+                );
+            }
+            await recordKm(key, p, km, date, 'manual');
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/docs': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const type = str(b.type, 20).toUpperCase();
+            if (!DOC_TYPES.includes(type)) return error('Tipo de documento no válido.', 400);
+            if (!isDate(b.expiry)) return error('La fecha de vencimiento es obligatoria.', 400);
+            const doc: Doc = {
+                type,
+                name: str(b.name, 80) || DOC_LABELS[type],
+                expiry: b.expiry,
+                notes: str(b.notes, 300),
+                notified: [],
+            };
+            await db.add(tbl('docs', key), [doc]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'PUT /api/docs/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const id = ctx.params.id;
+            const existing = await getOne<Doc>(tbl('docs', key), id);
+            if (!existing) return error('Documento no encontrado.', 404);
+            const type = str(b.type, 20).toUpperCase() || existing.type;
+            if (!DOC_TYPES.includes(type)) return error('Tipo de documento no válido.', 400);
+            if (!isDate(b.expiry)) return error('La fecha de vencimiento es obligatoria.', 400);
+            const record: Record<string, unknown> = {
+                type,
+                name: str(b.name, 80) || DOC_LABELS[type],
+                expiry: b.expiry,
+                notes: str(b.notes, 300),
+            };
+            if (b.expiry !== existing.expiry) record.notified = [];
+            await db.tx.update(tbl('docs', key), [{ id, record }], { patch: true });
+            return dashboardResponse(key);
+        },
+    ],
+
+    'DELETE /api/docs/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            await db.delete(tbl('docs', key), [ctx.params.id]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/maint': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const name = str(b.name, 80);
+            if (!name) return error('El nombre es obligatorio.', 400);
+            const intervalKm = Math.max(0, num(b.intervalKm) ?? 0);
+            const intervalDays = Math.max(0, Math.round(num(b.intervalDays) ?? 0));
+            if (intervalKm === 0 && intervalDays === 0) {
+                return error('Define un intervalo en km o en días.', 400);
+            }
+            const p = await getOne<Profile>('profiles', key);
+            const item: MaintItem = {
+                name,
+                category: str(b.category, 40) || 'Otros',
+                intervalKm,
+                intervalDays,
+                lastKm: Math.max(0, num(b.lastKm) ?? p?.currentKm ?? 0),
+                lastDate: isDate(b.lastDate) ? b.lastDate : today(),
+                notes: str(b.notes, 300),
+            };
+            await db.add(tbl('maint', key), [item]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'PUT /api/maint/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const name = str(b.name, 80);
+            if (!name) return error('El nombre es obligatorio.', 400);
+            const intervalKm = Math.max(0, num(b.intervalKm) ?? 0);
+            const intervalDays = Math.max(0, Math.round(num(b.intervalDays) ?? 0));
+            if (intervalKm === 0 && intervalDays === 0) {
+                return error('Define un intervalo en km o en días.', 400);
+            }
+            const lastKm = num(b.lastKm);
+            if (lastKm === null || lastKm < 0) return error('El kilometraje del último cambio no es válido.', 400);
+            if (!isDate(b.lastDate)) return error('La fecha del último cambio no es válida.', 400);
+            const [ok] = await db.tx.update(
+                tbl('maint', key),
+                [
+                    {
+                        id: ctx.params.id,
+                        record: {
+                            name,
+                            category: str(b.category, 40) || 'Otros',
+                            intervalKm,
+                            intervalDays,
+                            lastKm,
+                            lastDate: b.lastDate,
+                            notes: str(b.notes, 300),
+                            notifiedFor: undefined,
+                        },
+                    },
+                ],
+                { patch: true },
+            );
+            if (!ok) return error('Elemento no encontrado.', 404);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'DELETE /api/maint/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            await db.delete(tbl('maint', key), [ctx.params.id]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/maint/:id/done': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const id = ctx.params.id;
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const item = await getOne<MaintItem>(tbl('maint', key), id);
+            if (!item) return error('Elemento no encontrado.', 404);
+            const km = num(b.km);
+            if (km === null || km < 0) return error('Escribe el kilometraje del servicio.', 400);
+            const date = isDate(b.date) ? b.date : today();
+            const cost = Math.max(0, num(b.cost) ?? 0);
+            await db.tx.update(
+                tbl('maint', key),
+                [{ id, record: { lastKm: km, lastDate: date, notifiedFor: undefined } }],
+                { patch: true },
+            );
+            const service: Service = {
+                itemId: id,
+                itemName: item.name,
+                km,
+                date,
+                cost,
+                notes: str(b.notes, 300),
+            };
+            await db.add(tbl('service', key), [service]);
+            await recordKm(key, p, km, date, 'servicio');
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/fuel': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const km = num(b.km);
+            const gallons = num(b.gallons);
+            const total = num(b.total);
+            if (km === null || km < 0) return error('Escribe el kilometraje del tanqueo.', 400);
+            if (gallons === null || gallons <= 0 || gallons > 20) return error('Los galones no son válidos.', 400);
+            if (total === null || total < 0) return error('El valor pagado no es válido.', 400);
+            const date = isDate(b.date) ? b.date : today();
+            const fuel: Fuel = { date, km, gallons, total, fullTank: b.fullTank !== false };
+            await db.add(tbl('fuel', key), [fuel]);
+            await recordKm(key, p, km, date, 'tanqueo');
+            return dashboardResponse(key);
+        },
+    ],
+
+    'DELETE /api/fuel/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            await db.delete(tbl('fuel', key), [ctx.params.id]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/notify-test': [
+        requireAuth(),
+        async (ctx) => {
+            const r = await notifications.send({
+                userIds: [ctx.user!.userId],
+                notification: { title: 'Control Moto', body: '¡Las notificaciones funcionan! 🏍️' },
+                data: { kind: 'test' },
+            });
+            return json(r);
+        },
+    ],
+
+    'POST /api/reminders/run': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const messages = await remindUser(key, p);
+            return json({ messages });
+        },
+    ],
+});

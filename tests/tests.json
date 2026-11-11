@@ -1,0 +1,104 @@
+[
+  {
+    "name": "Register the moto and update the odometer",
+    "sanity": true,
+    "viewport": "desktop",
+    "covers": [
+      "sign-in",
+      "moto registration (PUT /api/profile)",
+      "dashboard load (GET /api/dashboard)",
+      "odometer update (POST /api/odometer)",
+      "persistence after reload"
+    ],
+    "description": "Verifies a signed-in user can register the moto and the new kilometraje persists.",
+    "setup": [
+      "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
+    ],
+    "steps": [
+      "Open the Inicio tab",
+      "Type 1350 in the Nuevo kilometraje field and press Guardar",
+      "Refresh the page"
+    ],
+    "expected": "The Inicio card shows 1.350 km as the current kilometraje after the refresh."
+  },
+  {
+    "name": "Reject a kilometraje lower than the current one",
+    "viewport": "mobile",
+    "covers": [
+      "odometer validation guardrail",
+      "visible error message",
+      "mobile layout"
+    ],
+    "description": "Verifies the app blocks an odometer reading lower than the last registered one.",
+    "setup": [
+      "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
+    ],
+    "steps": [
+      "Open the Inicio tab",
+      "Type 1000 in the Nuevo kilometraje field and press Guardar"
+    ],
+    "expected": "A visible error says the kilometraje cannot be lower than the last registered value, and the current kilometraje shown is still 1.200 km."
+  },
+  {
+    "name": "Add and delete a SOAT document",
+    "viewport": "desktop",
+    "covers": [
+      "legal module",
+      "tax regime by cilindraje",
+      "document create (POST /api/docs)",
+      "document delete with confirmation (DELETE /api/docs/:id)",
+      "persistence after reload"
+    ],
+    "description": "Verifies documents can be added with an expiry date and deleted after confirmation, and that a 163 cc moto is classified for impuesto vehicular.",
+    "setup": [
+      "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
+    ],
+    "steps": [
+      "Open the Legal tab",
+      "Press Agregar, choose type SOAT, set name SOAT Prueba and Fecha de vencimiento 2030-01-15, press Guardar documento",
+      "Confirm SOAT Prueba is listed",
+      "Press the delete button for SOAT Prueba and confirm with Eliminar",
+      "Refresh the page and open the Legal tab"
+    ],
+    "expected": "The Legal tab shows the Impuesto vehicular (departamental) card and licencia A2, and SOAT Prueba is no longer listed after the refresh."
+  },
+  {
+    "name": "Register two full-tank refuels and see consumption",
+    "viewport": "desktop",
+    "covers": [
+      "fuel log (POST /api/fuel)",
+      "km per gallon calculation",
+      "fuel history"
+    ],
+    "description": "Verifies refuels are saved and the km per gallon is calculated between two full tanks.",
+    "setup": [
+      "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
+    ],
+    "steps": [
+      "Open the Gasolina tab",
+      "Enter Kilometraje 5000, Galones 2, Total pagado 32000, keep Llené el tanque checked and press Guardar tanqueo",
+      "Enter Kilometraje 5300, Galones 3, Total pagado 48000, keep Llené el tanque checked and press Guardar tanqueo"
+    ],
+    "expected": "The Historial lists an entry with 5.300 km showing 100,0 km/gal."
+  },
+  {
+    "name": "Mark the oil change as done",
+    "viewport": "mobile",
+    "covers": [
+      "maintenance module",
+      "service log (POST /api/maint/:id/done)",
+      "service history"
+    ],
+    "description": "Verifies a maintenance item can be marked as done and appears in the service history.",
+    "setup": [
+      "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
+    ],
+    "steps": [
+      "Open the Taller tab",
+      "Press Hecho on Aceite de motor",
+      "Set Kilometraje 1200 and Costo 45000, press Registrar servicio",
+      "Scroll to Historial de servicios"
+    ],
+    "expected": "Historial de servicios shows Aceite de motor with 1.200 km and $ 45.000."
+  }
+]
