@@ -2,7 +2,8 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api } from '@appdeploy/client';
 import { Pencil, Plus, Trash2, Landmark, CreditCard, Bell } from 'lucide-react';
-import { Btn, Card, Chip, Confirm, Field, Modal, SectionTitle, inputCls } from './components';
+import { Btn, Card, Chip, Confirm, Field, Modal, SectionTitle, Segmented, inputCls } from './components';
+import Vault from './Vault';
 import { daysText, fmtDate, fmtMoney } from './lib';
 import type { DocView, Full, Run } from './types';
 
@@ -85,7 +86,7 @@ function DocForm({
     );
 }
 
-export default function Legal({ data, run }: { data: Full; run: Run }) {
+function Deadlines({ data, run }: { data: Full; run: Run }) {
     const [editing, setEditing] = useState<DocView | 'new' | null>(null);
     const [deleting, setDeleting] = useState<DocView | null>(null);
     const { tax } = data;
@@ -201,6 +202,39 @@ export default function Legal({ data, run }: { data: Full; run: Run }) {
                     if (d) await run(api.delete(`/api/docs/${d.id}`), 'Documento eliminado');
                 }}
             />
+        </div>
+    );
+}
+
+export default function Legal({
+    data,
+    run,
+    userId,
+    notify,
+}: {
+    data: Full;
+    run: Run;
+    userId: string;
+    notify: (kind: 'ok' | 'error', text: string) => void;
+}) {
+    const [view, setView] = useState<'deadlines' | 'vault'>('deadlines');
+    return (
+        <div>
+            <Segmented
+                value={view}
+                onChange={setView}
+                options={[
+                    { value: 'deadlines', label: 'Vencimientos' },
+                    { value: 'vault', label: 'Bóveda' },
+                ]}
+            />
+            <div className="mt-4">
+                {view === 'deadlines' ? (
+                    <Deadlines data={data} run={run} />
+                ) : (
+                    <Vault data={data} run={run} userId={userId} notify={notify} />
+                )}
+            </div>
         </div>
     );
 }

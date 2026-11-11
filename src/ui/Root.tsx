@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, auth } from '@appdeploy/client';
-import { Bike, Fuel, House, Settings as SettingsIcon, ShieldCheck, WifiOff, Wrench } from 'lucide-react';
+import { Bike, House, Settings as SettingsIcon, ShieldCheck, Wallet, WifiOff, Wrench } from 'lucide-react';
 import { Btn, Card } from './components';
 import Home from './Home';
 import Legal from './Legal';
 import Maint from './Maint';
-import FuelPage from './FuelPage';
+import Expenses from './Expenses';
 import Settings from './Settings';
 import ProfileForm from './ProfileForm';
 import { applyTheme, errMsg, loadCache, loadTheme, saveCache, saveTheme } from './lib';
@@ -19,7 +19,7 @@ const TABS: Array<{ id: Tab; label: string; icon: typeof House }> = [
     { id: 'home', label: 'Inicio', icon: House },
     { id: 'legal', label: 'Legal', icon: ShieldCheck },
     { id: 'maint', label: 'Taller', icon: Wrench },
-    { id: 'fuel', label: 'Gasolina', icon: Fuel },
+    { id: 'fuel', label: 'Gastos', icon: Wallet },
     { id: 'settings', label: 'Ajustes', icon: SettingsIcon },
 ];
 
@@ -217,9 +217,9 @@ export default function Root() {
 
             <main className="mx-auto max-w-xl px-4 pt-4">
                 {tab === 'home' && <Home data={data} run={run} goTo={setTab} />}
-                {tab === 'legal' && <Legal data={data} run={run} />}
+                {tab === 'legal' && <Legal data={data} run={run} userId={userId} notify={notify} />}
                 {tab === 'maint' && <Maint data={data} run={run} />}
-                {tab === 'fuel' && <FuelPage data={data} run={run} />}
+                {tab === 'fuel' && <Expenses data={data} run={run} />}
                 {tab === 'settings' && (
                     <Settings data={data} run={run} theme={theme} setTheme={setTheme} notify={notify} />
                 )}

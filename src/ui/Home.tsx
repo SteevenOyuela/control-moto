@@ -153,8 +153,13 @@ export default function Home({ data, run, goTo }: { data: Full; run: Run; goTo: 
                 </div>
             )}
 
-            <SectionTitle>Consumo</SectionTitle>
+            <SectionTitle>Consumo y gastos</SectionTitle>
             <div className="grid grid-cols-2 gap-2">
+                <Stat
+                    label="Gastos de este mes"
+                    value={fmtMoney(data.spending.monthTotal)}
+                    sub="Gasolina, taller y otros"
+                />
                 <Stat
                     label="Rendimiento promedio"
                     value={data.fuelStats.avgKmPerGal !== null ? `${fmtNum(data.fuelStats.avgKmPerGal)} km/gal` : '—'}

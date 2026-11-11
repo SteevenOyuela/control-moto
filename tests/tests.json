@@ -63,23 +63,26 @@
     "expected": "The Legal tab shows the Impuesto vehicular (departamental) card and licencia A2, and SOAT Prueba is no longer listed after the refresh."
   },
   {
-    "name": "Register two full-tank refuels and see consumption",
-    "viewport": "desktop",
+    "name": "Register refuels and another expense",
+    "viewport": "mobile",
     "covers": [
       "fuel log (POST /api/fuel)",
       "km per gallon calculation",
-      "fuel history"
+      "other expenses (POST /api/expenses)",
+      "spending summary",
+      "mobile form layout"
     ],
-    "description": "Verifies refuels are saved and the km per gallon is calculated between two full tanks.",
+    "description": "Verifies refuels and extra expenses are saved in the Gastos tab and the consumption is calculated between two full tanks.",
     "setup": [
       "Sign in. If the moto registration form (Registra tu moto) is shown, fill Placa ABC12D, Cilindraje 163, Kilometraje actual 1200 and Fecha de matrícula 2025-06-01, then press Empezar. If the app is already registered, open Ajustes, set Kilometraje actual to 1200 under Mi moto and press Guardar cambios"
     ],
     "steps": [
-      "Open the Gasolina tab",
+      "Open the Gastos tab and keep the Gasolina view",
       "Enter Kilometraje 5000, Galones 2, Total pagado 32000, keep Llené el tanque checked and press Guardar tanqueo",
-      "Enter Kilometraje 5300, Galones 3, Total pagado 48000, keep Llené el tanque checked and press Guardar tanqueo"
+      "Enter Kilometraje 5300, Galones 3, Total pagado 48000, keep Llené el tanque checked and press Guardar tanqueo",
+      "Switch to Otros gastos, choose category Parqueadero, enter Valor 5000 and press Guardar gasto"
     ],
-    "expected": "The Historial lists an entry with 5.300 km showing 100,0 km/gal."
+    "expected": "The Gasolina historial shows an entry with 5.300 km at 100,0 km/gal, and Últimos gastos lists Parqueadero · $ 5.000."
   },
   {
     "name": "Mark the oil change as done",

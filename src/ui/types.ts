@@ -81,6 +81,34 @@ export type Tax = {
     licenseDetail: string;
 };
 
+export type ExpenseView = {
+    id: string;
+    date: string;
+    category: string;
+    amount: number;
+    note: string;
+};
+
+export type Spending = {
+    total: number;
+    monthTotal: number;
+    month: string;
+    kmDriven: number;
+    costPerKmTotal: number | null;
+    byCategory: Array<{ category: string; amount: number }>;
+    monthByCategory: Array<{ category: string; amount: number }>;
+    byMonth: Array<{ month: string; amount: number }>;
+};
+
+export type VaultItem = {
+    id: string;
+    kind: string;
+    title: string;
+    mimeType: string;
+    bytes: number;
+    createdAt: string;
+};
+
 export type Full = {
     profile: Profile;
     today: string;
@@ -93,6 +121,9 @@ export type Full = {
     services: ServiceView[];
     fuel: FuelView[];
     fuelStats: FuelStats;
+    expenses: ExpenseView[];
+    expenseCategories: string[];
+    spending: Spending;
 };
 
 export type Dashboard = Full | { profile: null; today: string };

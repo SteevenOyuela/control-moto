@@ -90,10 +90,10 @@ export default function FuelPage({ data, run }: { data: Full; run: Run }) {
                         ))}
                     </div>
                     <div className="grid grid-cols-2 gap-3">
-                        <Field label="Fecha">
+                        <Field label="Fecha" className="col-span-2 sm:col-span-1">
                             <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
                         </Field>
-                        <Field label="Kilometraje" error={errors.km}>
+                        <Field label="Kilometraje" error={errors.km} className="col-span-2 sm:col-span-1">
                             <input
                                 className={inputCls}
                                 inputMode="numeric"

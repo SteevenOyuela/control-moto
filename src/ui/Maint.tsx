@@ -41,10 +41,10 @@ function DoneForm({
         <form onSubmit={submit} className="space-y-4" noValidate>
             <p className="text-sm text-zinc-600 dark:text-zinc-300">{item.name}</p>
             <div className="grid grid-cols-2 gap-3">
-                <Field label="Kilometraje" error={err}>
+                <Field label="Kilometraje" error={err} className="col-span-2 sm:col-span-1">
                     <input className={inputCls} inputMode="numeric" aria-label="Kilometraje del servicio" value={km} onChange={(e) => setKm(e.target.value)} />
                 </Field>
-                <Field label="Fecha">
+                <Field label="Fecha" className="col-span-2 sm:col-span-1">
                     <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
                 </Field>
             </div>
@@ -131,7 +131,7 @@ function ItemForm({
                 <Field label="Último cambio (km)" error={errors.lastKm}>
                     <input className={inputCls} inputMode="numeric" value={lastKm} onChange={(e) => setLastKm(e.target.value)} />
                 </Field>
-                <Field label="Fecha último cambio" error={errors.lastDate}>
+                <Field label="Fecha último cambio" error={errors.lastDate} className="col-span-2 sm:col-span-1">
                     <input type="date" className={inputCls} value={lastDate} onChange={(e) => setLastDate(e.target.value)} />
                 </Field>
             </div>

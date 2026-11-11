@@ -6,6 +6,8 @@ import {
     db,
     notifications,
     isAppDatabaseError,
+    storage,
+    ai,
 } from '@appdeploy/sdk';
 import type { RouterContext } from '@appdeploy/sdk';
 
@@ -66,6 +68,22 @@ type Fuel = {
 
 type Odo = { date: string; km: number; source: string };
 
+type Expense = {
+    date: string;
+    category: string;
+    amount: number;
+    note?: string;
+};
+
+type VaultItem = {
+    kind: string;
+    title: string;
+    path: string;
+    mimeType: string;
+    bytes: number;
+    createdAt: string;
+};
+
 type Status = 'ok' | 'pronto' | 'urgente' | 'vencido';
 
 type WithId<T> = T & { id: string };
@@ -84,6 +102,34 @@ const DOC_LABELS: Record<string, string> = {
     IMPUESTO: 'Impuesto vehicular',
     OTRO: 'Documento',
 };
+
+const EXPENSE_CATEGORIES = [
+    'Parqueadero',
+    'Lavada',
+    'Peajes',
+    'Accesorios',
+    'Repuestos',
+    'Documentos e impuestos',
+    'Multas',
+    'Otros',
+];
+
+const VAULT_KINDS = ['SOAT', 'TARJETA', 'LICENCIA', 'RTM', 'OTRO'];
+const VAULT_LABELS: Record<string, string> = {
+    SOAT: 'SOAT',
+    TARJETA: 'Tarjeta de propiedad',
+    LICENCIA: 'Licencia de conducción',
+    RTM: 'Certificado técnico-mecánica',
+    OTRO: 'Documento',
+};
+const VAULT_MIME: Record<string, string> = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'application/pdf': 'pdf',
+};
+// ~3,5 MB decodificados: deja margen bajo el límite de 6 MB por petición.
+const VAULT_MAX_BASE64 = 4_800_000;
 
 // Intervalos de referencia para Hero Hunk 160R 4V (refrigerada por aire/aceite).
 // El usuario puede ajustarlos desde la app.
@@ -362,16 +408,77 @@ function taxInfo(p: Profile) {
     };
 }
 
+function monthsBack(t: string, n: number): string[] {
+    const [y, m] = t.split('-').map(Number);
+    const out: string[] = [];
+    for (let i = n - 1; i >= 0; i--) {
+        out.push(new Date(Date.UTC(y, m - 1 - i, 1)).toISOString().slice(0, 7));
+    }
+    return out;
+}
+
+function spending(
+    fuel: Array<WithId<Fuel>>,
+    services: Array<WithId<Service>>,
+    expenses: Array<WithId<Expense>>,
+    odo: Array<WithId<Odo>>,
+    profile: Profile,
+    t: string,
+) {
+    const rows = [
+        ...fuel.map((f) => ({ date: f.date, amount: f.total, category: 'Gasolina' })),
+        ...services.map((s) => ({ date: s.date, amount: s.cost, category: 'Mantenimiento' })),
+        ...expenses.map((e) => ({ date: e.date, amount: e.amount, category: e.category || 'Otros' })),
+    ].filter((r) => isDate(r.date) && Number.isFinite(r.amount) && r.amount > 0);
+
+    const month = t.slice(0, 7);
+    const months = monthsBack(t, 6);
+    const byCategory: Record<string, number> = {};
+    const monthByCategory: Record<string, number> = {};
+    const byMonth: Record<string, number> = {};
+    for (const m of months) byMonth[m] = 0;
+    let total = 0;
+    let monthTotal = 0;
+    for (const r of rows) {
+        total += r.amount;
+        byCategory[r.category] = (byCategory[r.category] ?? 0) + r.amount;
+        const m = r.date.slice(0, 7);
+        if (m in byMonth) byMonth[m] += r.amount;
+        if (m === month) {
+            monthTotal += r.amount;
+            monthByCategory[r.category] = (monthByCategory[r.category] ?? 0) + r.amount;
+        }
+    }
+    const kms = odo.map((o) => o.km).filter((k) => Number.isFinite(k));
+    const firstKm = kms.length ? Math.min(...kms) : profile.currentKm;
+    const kmDriven = profile.currentKm - firstKm;
+    const sorted = (o: Record<string, number>) =>
+        Object.entries(o)
+            .map(([category, amount]) => ({ category, amount }))
+            .sort((a, b) => b.amount - a.amount);
+    return {
+        total,
+        monthTotal,
+        month,
+        kmDriven,
+        costPerKmTotal: kmDriven > 0 ? total / kmDriven : null,
+        byCategory: sorted(byCategory),
+        monthByCategory: sorted(monthByCategory),
+        byMonth: months.map((m) => ({ month: m, amount: byMonth[m] })),
+    };
+}
+
 const STATUS_ORDER: Record<Status, number> = { vencido: 0, urgente: 1, pronto: 2, ok: 3 };
 
 async function buildDashboard(key: string, profile: Profile) {
     const t = today();
-    const [docs, items, services, fuel, odo] = await Promise.all([
+    const [docs, items, services, fuel, odo, expenses] = await Promise.all([
         listAll<Doc>(tbl('docs', key)),
         listAll<MaintItem>(tbl('maint', key)),
         listAll<Service>(tbl('service', key)),
         listAll<Fuel>(tbl('fuel', key)),
         listAll<Odo>(tbl('odo', key)),
+        listAll<Expense>(tbl('expense', key)),
     ]);
     const rate = dailyRate(odo, t);
     const estimatedKmToday = rate
@@ -442,8 +549,51 @@ async function buildDashboard(key: string, profile: Profile) {
         services: serviceViews,
         fuel: fuelViews,
         fuelStats: fs.stats,
+        expenses: [...expenses]
+            .sort((a, b) => dayNum(b.date) - dayNum(a.date))
+            .slice(0, 100)
+            .map((e) => ({ id: e.id, date: e.date, category: e.category, amount: e.amount, note: e.note ?? '' })),
+        expenseCategories: EXPENSE_CATEGORIES,
+        spending: spending(fuel, services, expenses, odo, profile, t),
     };
 }
+
+async function vaultList(key: string) {
+    const items = await listAll<VaultItem>(tbl('vault', key));
+    return items
+        .map((v) => ({
+            id: v.id,
+            kind: v.kind,
+            title: v.title,
+            mimeType: v.mimeType,
+            bytes: v.bytes,
+            createdAt: v.createdAt,
+        }))
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+const EXTRACT_SCHEMA = {
+    type: 'object',
+    properties: {
+        documentType: {
+            type: 'string',
+            enum: ['SOAT', 'RTM', 'LICENCIA', 'TARJETA', 'OTRO'],
+            description: 'Tipo de documento colombiano detectado',
+        },
+        expiryDate: {
+            type: ['string', 'null'],
+            description: 'Fecha de vencimiento o fin de vigencia en formato YYYY-MM-DD, o null si no aparece',
+        },
+        startDate: {
+            type: ['string', 'null'],
+            description: 'Fecha de inicio de vigencia o de expedición en formato YYYY-MM-DD, o null',
+        },
+        plate: { type: ['string', 'null'], description: 'Placa del vehículo si aparece' },
+        documentNumber: { type: ['string', 'null'], description: 'Número de póliza, certificado o licencia' },
+        issuer: { type: ['string', 'null'], description: 'Aseguradora, CDA o entidad que lo expide' },
+    },
+    required: ['documentType', 'expiryDate'],
+};
 
 async function dashboardResponse(key: string) {
     const p = await getOne<Profile>('profiles', key);
@@ -833,6 +983,136 @@ export const handler = router({
             const key = keyOf(ctx);
             await db.delete(tbl('fuel', key), [ctx.params.id]);
             return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/expenses': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const amount = num(b.amount);
+            if (amount === null || amount <= 0) return error('Escribe el valor del gasto.', 400);
+            const category = str(b.category, 40);
+            if (!EXPENSE_CATEGORIES.includes(category)) return error('Elige una categoría válida.', 400);
+            const expense: Expense = {
+                date: isDate(b.date) ? b.date : today(),
+                category,
+                amount,
+                note: str(b.note, 200),
+            };
+            await db.add(tbl('expense', key), [expense]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'DELETE /api/expenses/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            await db.delete(tbl('expense', key), [ctx.params.id]);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'GET /api/vault': [requireAuth(), async (ctx) => json({ items: await vaultList(keyOf(ctx)) })],
+
+    'POST /api/vault': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const kind = str(b.kind, 20).toUpperCase();
+            if (!VAULT_KINDS.includes(kind)) return error('Tipo de documento no válido.', 400);
+            const mimeType = str(b.mimeType, 40);
+            const ext = VAULT_MIME[mimeType];
+            if (!ext) return error('Solo se permiten fotos (JPG, PNG, WEBP) o PDF.', 400);
+            const data = typeof b.data === 'string' ? b.data : '';
+            if (!data) return error('No llegó el archivo.', 400);
+            if (data.length > VAULT_MAX_BASE64) return error('El archivo es muy grande (máximo 3,5 MB).', 400);
+            const path = `vault/${key}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+            const [ok] = await storage.write([{ path, content: data, contentType: mimeType }]);
+            if (!ok) return error('No se pudo guardar el archivo. Intenta de nuevo.', 500);
+            const item: VaultItem = {
+                kind,
+                title: str(b.title, 80) || VAULT_LABELS[kind],
+                path,
+                mimeType,
+                bytes: Math.round((data.length * 3) / 4),
+                createdAt: new Date().toISOString(),
+            };
+            const [id] = await db.add(tbl('vault', key), [item]);
+            if (!id) {
+                await storage.delete([path]);
+                return error('No se pudo registrar el archivo.', 500);
+            }
+            return json({ id, items: await vaultList(key) });
+        },
+    ],
+
+    'GET /api/vault/:id/file': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (!item) return error('Archivo no encontrado.', 404);
+            const [file] = await storage.read([item.path]);
+            if (!file || file.content === null) return error('Archivo no encontrado.', 404);
+            return json({ data: file.content, mimeType: item.mimeType });
+        },
+    ],
+
+    'DELETE /api/vault/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (item) {
+                await storage.delete([item.path]);
+                await db.delete(tbl('vault', key), [ctx.params.id]);
+            }
+            return json({ items: await vaultList(key) });
+        },
+    ],
+
+    'POST /api/vault/:id/extract': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (!item) return error('Archivo no encontrado.', 404);
+            if (!item.mimeType.startsWith('image/')) {
+                return error('La lectura automática funciona con fotos, no con PDF.', 400);
+            }
+            const [file] = await storage.read([item.path]);
+            if (!file || file.content === null) return error('Archivo no encontrado.', 404);
+            try {
+                const result = await ai.extract({
+                    system:
+                        'Eres un asistente que lee documentos de tránsito de Colombia (SOAT, revisión técnico-mecánica, licencia de conducción, tarjeta de propiedad).',
+                    prompt:
+                        'Lee el documento de la imagen y devuelve el tipo de documento y sus fechas en formato YYYY-MM-DD. Las fechas en Colombia suelen escribirse DD/MM/AAAA. Para el SOAT la fecha de vencimiento es el fin de vigencia. Si un dato no aparece, usa null.',
+                    images: [{ data: file.content, mimeType: item.mimeType }],
+                    schema: EXTRACT_SCHEMA,
+                    maxRetries: 2,
+                });
+                const d = (result.data ?? {}) as Record<string, unknown>;
+                return json({
+                    documentType: str(d.documentType, 20) || item.kind,
+                    expiryDate: isDate(d.expiryDate) ? d.expiryDate : null,
+                    startDate: isDate(d.startDate) ? d.startDate : null,
+                    plate: str(d.plate, 12) || null,
+                    documentNumber: str(d.documentNumber, 40) || null,
+                    issuer: str(d.issuer, 60) || null,
+                });
+            } catch (err) {
+                const rpc = err as { statusCode?: number; responseText?: string };
+                console.error('extract failed', rpc?.statusCode, rpc?.responseText);
+                if (rpc?.statusCode === 429) {
+                    return error('La IA está ocupada en este momento. Intenta en unos minutos.', 429);
+                }
+                return error('No pude leer el documento. Prueba con una foto más nítida.', 502);
+            }
         },
     ],
 

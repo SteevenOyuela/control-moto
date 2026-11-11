@@ -2,3 +2,4 @@ node_modules/
 dist/
 .local-types/
 tsconfig.check.json
+tsconfig.backend.json

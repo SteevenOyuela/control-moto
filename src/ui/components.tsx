@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 import type { Status } from './types';
 
 export const inputCls =
-    'w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 outline-none ' +
+    'block w-full min-w-0 max-w-full rounded-xl border border-zinc-300 bg-white px-3 py-2.5 text-base text-zinc-900 outline-none ' +
     'focus:border-red-500 focus:ring-2 focus:ring-red-500/30 ' +
     'dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100';
 
@@ -61,14 +61,16 @@ export function Field({
     children,
     error,
     hint,
+    className = '',
 }: {
     label: string;
     children: ReactNode;
     error?: string;
     hint?: ReactNode;
+    className?: string;
 }) {
     return (
-        <label className="block space-y-1">
+        <label className={`block min-w-0 space-y-1 ${className}`}>
             <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
             {children}
             {hint && !error && <span className="block text-xs text-zinc-500 dark:text-zinc-400">{hint}</span>}
@@ -185,6 +187,39 @@ export function Stat({ label, value, sub }: { label: string; value: string; sub?
             <div className="text-xs text-zinc-500 dark:text-zinc-400">{label}</div>
             <div className="text-lg font-bold">{value}</div>
             {sub && <div className="text-xs text-zinc-500 dark:text-zinc-400">{sub}</div>}
+        </div>
+    );
+}
+
+export function Segmented<T extends string>({
+    value,
+    onChange,
+    options,
+}: {
+    value: T;
+    onChange: (v: T) => void;
+    options: Array<{ value: T; label: string }>;
+}) {
+    return (
+        <div
+            className="grid gap-1 rounded-xl bg-zinc-100 p-1 dark:bg-zinc-800"
+            style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+            role="tablist"
+        >
+            {options.map((o) => (
+                <button
+                    key={o.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={value === o.value}
+                    onClick={() => onChange(o.value)}
+                    className={`truncate rounded-lg px-2 py-2 text-sm font-semibold ${
+                        value === o.value ? 'bg-white shadow dark:bg-zinc-950' : 'text-zinc-500 dark:text-zinc-400'
+                    }`}
+                >
+                    {o.label}
+                </button>
+            ))}
         </div>
     );
 }
