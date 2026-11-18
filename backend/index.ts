@@ -28,6 +28,7 @@ type Profile = {
     avaluo: number;
     city: string;
     createdAt: string;
+    logoPath?: string;
 };
 
 type Doc = {
@@ -113,6 +114,22 @@ const EXPENSE_CATEGORIES = [
     'Multas',
     'Otros',
 ];
+
+const SCAN_CATEGORIES = [...EXPENSE_CATEGORIES, 'Gasolina'];
+
+const RECEIPT_SCHEMA = {
+    type: 'object',
+    properties: {
+        merchant: { type: ['string', 'null'], description: 'Nombre del establecimiento' },
+        date: { type: ['string', 'null'], description: 'Fecha de la compra en formato YYYY-MM-DD' },
+        total: { type: ['number', 'null'], description: 'Total pagado en pesos colombianos, sin separadores' },
+        category: { type: 'string', enum: SCAN_CATEGORIES, description: 'Categoría del gasto' },
+        gallons: { type: ['number', 'null'], description: 'Galones de combustible, solo si es gasolina' },
+        pricePerGallon: { type: ['number', 'null'], description: 'Precio por galón, solo si es gasolina' },
+        summary: { type: ['string', 'null'], description: 'Descripción corta de lo comprado' },
+    },
+    required: ['total', 'category'],
+};
 
 const VAULT_KINDS = ['SOAT', 'TARJETA', 'LICENCIA', 'RTM', 'OTRO'];
 const VAULT_LABELS: Record<string, string> = {
@@ -1006,6 +1023,51 @@ export const handler = router({
         },
     ],
 
+    'POST /api/expenses/scan': [
+        requireAuth(),
+        async (ctx) => {
+            const b = bodyOf(ctx);
+            const mimeType = str(b.mimeType, 40);
+            if (!mimeType.startsWith('image/') || !VAULT_MIME[mimeType]) {
+                return error('Envía una foto de la factura (JPG, PNG o WEBP).', 400);
+            }
+            const data = typeof b.data === 'string' ? b.data : '';
+            if (!data) return error('No llegó la foto.', 400);
+            if (data.length > VAULT_MAX_BASE64) return error('La foto es muy grande.', 400);
+            try {
+                const result = await ai.extract({
+                    system: 'Lees facturas y recibos de Colombia para una app de gastos de una moto.',
+                    prompt:
+                        'Extrae los datos de esta factura o recibo. Los valores están en pesos colombianos: el punto separa miles ("$45.000" = 45000). Usa el TOTAL pagado, no subtotales. La fecha va en formato YYYY-MM-DD (en Colombia suele escribirse DD/MM/AAAA). Elige la categoría que mejor describa el gasto de la moto: Gasolina (estaciones de servicio, combustible), Parqueadero, Lavada, Peajes, Accesorios (cascos, guantes, impermeables), Repuestos (taller, aceite, llantas, piezas), Documentos e impuestos (SOAT, RTM, impuesto, trámites), Multas u Otros. Si es gasolina, extrae también los galones y el precio por galón. Si un dato no aparece, usa null.',
+                    images: [{ data, mimeType }],
+                    schema: RECEIPT_SCHEMA,
+                    maxRetries: 2,
+                });
+                const d = (result.data ?? {}) as Record<string, unknown>;
+                const category = SCAN_CATEGORIES.includes(str(d.category, 40)) ? str(d.category, 40) : 'Otros';
+                const total = num(d.total);
+                const gallons = num(d.gallons);
+                const ppg = num(d.pricePerGallon);
+                return json({
+                    merchant: str(d.merchant, 80) || null,
+                    date: isDate(d.date) ? d.date : null,
+                    total: total !== null && total > 0 ? Math.round(total) : null,
+                    category,
+                    gallons: gallons !== null && gallons > 0 && gallons <= 20 ? gallons : null,
+                    pricePerGallon: ppg !== null && ppg > 0 ? Math.round(ppg) : null,
+                    summary: str(d.summary, 120) || null,
+                });
+            } catch (err) {
+                const rpc = err as { statusCode?: number; responseText?: string };
+                console.error('receipt scan failed', rpc?.statusCode, rpc?.responseText);
+                if (rpc?.statusCode === 429) {
+                    return error('La IA está ocupada en este momento. Intenta en unos minutos.', 429);
+                }
+                return error('No pude leer la factura. Prueba con una foto más nítida y bien recortada.', 502);
+            }
+        },
+    ],
+
     'DELETE /api/expenses/:id': [
         requireAuth(),
         async (ctx) => {
@@ -1113,6 +1175,49 @@ export const handler = router({
                 }
                 return error('No pude leer el documento. Prueba con una foto más nítida.', 502);
             }
+        },
+    ],
+
+    'GET /api/logo': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p?.logoPath) return json({ data: null });
+            const [file] = await storage.read([p.logoPath]);
+            if (!file || file.content === null) return json({ data: null });
+            return json({ data: file.content, mimeType: 'image/png' });
+        },
+    ],
+
+    'POST /api/logo': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const data = typeof b.data === 'string' ? b.data : '';
+            if (!data) return error('No llegó la imagen del logo.', 400);
+            if (data.length > 2_000_000) return error('El logo es muy pesado.', 400);
+            const path = `logo/${key}.png`;
+            const [ok] = await storage.write([{ path, content: data, contentType: 'image/png' }]);
+            if (!ok) return error('No se pudo guardar el logo.', 500);
+            await db.tx.update('profiles', [{ id: key, record: { logoPath: path } }], { patch: true });
+            return json({ ok: true });
+        },
+    ],
+
+    'DELETE /api/logo': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (p?.logoPath) {
+                await storage.delete([p.logoPath]);
+                await db.tx.update('profiles', [{ id: key, record: { logoPath: undefined } }], { patch: true });
+            }
+            return json({ ok: true });
         },
     ],
 

@@ -4,6 +4,7 @@ import { api } from '@appdeploy/client';
 import { Trash2 } from 'lucide-react';
 import { Btn, Card, Confirm, Field, SectionTitle, Segmented, Stat, inputCls } from './components';
 import FuelPage from './FuelPage';
+import ReceiptScan from './ReceiptScan';
 import { fmtDate, fmtKm, fmtMoney, parseNum, todayLocal } from './lib';
 import type { ExpenseView, Full, Run } from './types';
 
@@ -29,6 +30,11 @@ export default function Expenses({ data, run }: { data: Full; run: Run }) {
                 ]}
             />
             <div className="mt-4">
+                {view !== 'summary' && (
+                    <div className="mb-4">
+                        <ReceiptScan data={data} run={run} />
+                    </div>
+                )}
                 {view === 'fuel' && <FuelPage data={data} run={run} />}
                 {view === 'other' && <OtherExpenses data={data} run={run} />}
                 {view === 'summary' && <Summary data={data} />}

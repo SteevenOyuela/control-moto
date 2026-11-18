@@ -3,6 +3,7 @@ import { api, auth, notifications } from '@appdeploy/client';
 import { Bell, BellRing, LogOut, Monitor, Moon, RefreshCw, Sun } from 'lucide-react';
 import { Btn, Card, SectionTitle } from './components';
 import ProfileForm from './ProfileForm';
+import LogoSettings from './LogoSettings';
 import { errMsg } from './lib';
 import type { Theme } from './lib';
 import type { Full, Run } from './types';
@@ -13,12 +14,16 @@ export default function Settings({
     theme,
     setTheme,
     notify,
+    logo,
+    setLogo,
 }: {
     data: Full;
     run: Run;
     theme: Theme;
     setTheme: (t: Theme) => void;
     notify: (kind: 'ok' | 'error', text: string) => void;
+    logo: string | null;
+    setLogo: (dataUrl: string | null) => void;
 }) {
     const [perm, setPerm] = useState<string>('');
     const [iosHint, setIosHint] = useState(false);
@@ -99,6 +104,9 @@ export default function Settings({
                     </button>
                 ))}
             </div>
+
+            <SectionTitle>Logo de la app</SectionTitle>
+            <LogoSettings logo={logo} setLogo={setLogo} notify={notify} />
 
             <SectionTitle>Notificaciones</SectionTitle>
             <Card className="space-y-3">

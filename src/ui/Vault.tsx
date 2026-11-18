@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, image } from '@appdeploy/client';
-import { CloudOff, FileText, ScanText, Trash2, Upload, Eye } from 'lucide-react';
+import { CloudOff, Crop, FileText, ScanText, Trash2, Upload, Eye } from 'lucide-react';
+import Cropper from './Cropper';
 import { Btn, Card, Confirm, Field, Modal, inputCls } from './components';
 import { errMsg, fmtDate } from './lib';
 import { base64ToBlob, blobToBase64, deleteFile, getFile, getMeta, putFile, putMeta } from './vaultStore';
@@ -347,23 +348,53 @@ export default function Vault({
 function UploadForm({ onUploaded }: { onUploaded: (id: string, list: VaultItem[], blob: Blob) => Promise<void> }) {
     const [kind, setKind] = useState('SOAT');
     const [title, setTitle] = useState('');
-    const [file, setFile] = useState<File | null>(null);
+    const [raw, setRaw] = useState<File | null>(null);
+    const [cropped, setCropped] = useState<Blob | null>(null);
+    const [preview, setPreview] = useState('');
+    const [cropping, setCropping] = useState(false);
     const [err, setErr] = useState('');
     const [busy, setBusy] = useState(false);
 
-    const submit = async (e: FormEvent) => {
-        e.preventDefault();
-        if (!file) {
-            setErr('Elige una foto o un PDF.');
+    useEffect(() => {
+        if (!cropped) {
+            setPreview('');
             return;
         }
-        const isPdf = file.type === 'application/pdf';
-        if (!isPdf && !file.type.startsWith('image/')) {
+        const u = URL.createObjectURL(cropped);
+        setPreview(u);
+        return () => URL.revokeObjectURL(u);
+    }, [cropped]);
+
+    const isPdf = raw?.type === 'application/pdf';
+
+    const pick = (f: File | null) => {
+        setErr('');
+        setCropped(null);
+        setRaw(f);
+        if (!f) return;
+        if (f.type === 'application/pdf') {
+            if (f.size > MAX_PDF_BYTES) setErr('El PDF pesa más de 3,5 MB. Toma una foto o captura de pantalla.');
+            return;
+        }
+        if (!f.type.startsWith('image/')) {
             setErr('Solo se permiten fotos o PDF.');
             return;
         }
-        if (isPdf && file.size > MAX_PDF_BYTES) {
+        setCropping(true);
+    };
+
+    const submit = async (e: FormEvent) => {
+        e.preventDefault();
+        if (!raw) {
+            setErr('Elige o toma una foto, o un PDF.');
+            return;
+        }
+        if (isPdf && raw.size > MAX_PDF_BYTES) {
             setErr('El PDF pesa más de 3,5 MB. Toma una foto o captura de pantalla.');
+            return;
+        }
+        if (!isPdf && !cropped) {
+            setCropping(true);
             return;
         }
         setErr('');
@@ -373,11 +404,11 @@ function UploadForm({ onUploaded }: { onUploaded: (id: string, list: VaultItem[]
             let mimeType: string;
             let blob: Blob;
             if (isPdf) {
-                payload = await blobToBase64(file);
+                payload = await blobToBase64(raw);
                 mimeType = 'application/pdf';
-                blob = file;
+                blob = raw;
             } else {
-                const prepared = await image.resizeIfNeeded(file, {
+                const prepared = await image.resizeIfNeeded(cropped!, {
                     maxDimension: 2000,
                     maxPixels: 3_000_000,
                     quality: 0.85,
@@ -396,6 +427,22 @@ function UploadForm({ onUploaded }: { onUploaded: (id: string, list: VaultItem[]
         setBusy(false);
     };
 
+    if (cropping && raw) {
+        return (
+            <Cropper
+                file={raw}
+                onCancel={() => {
+                    setCropping(false);
+                    if (!cropped) setRaw(null);
+                }}
+                onDone={(b) => {
+                    setCropped(b);
+                    setCropping(false);
+                }}
+            />
+        );
+    }
+
     return (
         <form onSubmit={submit} className="space-y-4" noValidate>
             <Field label="Tipo de documento">
@@ -413,16 +460,29 @@ function UploadForm({ onUploaded }: { onUploaded: (id: string, list: VaultItem[]
             <Field
                 label="Foto o PDF"
                 error={err}
-                hint={READABLE.includes(kind) ? 'Si es una foto, leo la fecha de vencimiento automáticamente.' : undefined}
+                hint={
+                    READABLE.includes(kind)
+                        ? 'Toma la foto o elígela de tu galería. Luego la recortas y leo la fecha de vencimiento.'
+                        : 'Toma la foto o elígela de tu galería. Luego la puedes recortar.'
+                }
             >
                 <input
                     type="file"
                     accept="image/*,application/pdf"
                     aria-label="Foto o PDF"
                     className="block w-full text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-red-600 file:px-3 file:py-2 file:font-semibold file:text-white"
-                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    onChange={(e) => pick(e.target.files?.[0] ?? null)}
                 />
             </Field>
+            {preview && (
+                <div className="space-y-2">
+                    <img src={preview} alt="Vista previa del recorte" className="max-h-64 w-full rounded-xl object-contain" />
+                    <Btn variant="secondary" className="w-full" onClick={() => setCropping(true)}>
+                        <Crop size={16} /> Recortar de nuevo
+                    </Btn>
+                </div>
+            )}
+            {isPdf && raw && <p className="text-xs text-zinc-500">PDF listo: {raw.name}</p>}
             <Btn type="submit" disabled={busy} className="w-full">
                 {busy ? 'Subiendo…' : 'Guardar en la bóveda'}
             </Btn>

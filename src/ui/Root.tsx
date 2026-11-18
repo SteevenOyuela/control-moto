@@ -8,7 +8,17 @@ import Maint from './Maint';
 import Expenses from './Expenses';
 import Settings from './Settings';
 import ProfileForm from './ProfileForm';
-import { applyTheme, errMsg, loadCache, loadTheme, saveCache, saveTheme } from './lib';
+import {
+    applyTheme,
+    errMsg,
+    loadCache,
+    loadLogo,
+    loadTheme,
+    saveCache,
+    saveLogo,
+    saveTheme,
+    setTouchIcon,
+} from './lib';
 import type { Theme } from './lib';
 import type { Dashboard, Full, Run } from './types';
 
@@ -23,6 +33,30 @@ const TABS: Array<{ id: Tab; label: string; icon: typeof House }> = [
     { id: 'settings', label: 'Ajustes', icon: SettingsIcon },
 ];
 
+const SPLASH_MIN_MS = 1100;
+
+/** Logo del usuario si lo subió; si no, el ícono de la app. */
+function BrandMark({ logo, size }: { logo: string | null; size: number }) {
+    if (logo) {
+        return (
+            <img
+                src={logo}
+                alt="Logo"
+                className="rounded-[22%] object-cover shadow-lg"
+                style={{ width: size, height: size }}
+            />
+        );
+    }
+    return (
+        <div
+            className="flex items-center justify-center rounded-[22%] bg-red-600 text-white shadow-lg"
+            style={{ width: size, height: size }}
+        >
+            <Bike size={Math.round(size * 0.55)} />
+        </div>
+    );
+}
+
 export default function Root() {
     const [authState, setAuthState] = useState<'loading' | 'out' | 'in'>('loading');
     const [userId, setUserId] = useState('');
@@ -33,7 +67,22 @@ export default function Root() {
     const [tab, setTab] = useState<Tab>('home');
     const [toast, setToast] = useState<Toast | null>(null);
     const [theme, setTheme] = useState<Theme>(loadTheme());
+    const [logo, setLogoState] = useState<string | null>(loadLogo());
+    const [minSplashDone, setMinSplashDone] = useState(false);
+    const [splashGone, setSplashGone] = useState(false);
     const toastTimer = useRef<number | undefined>(undefined);
+
+    const setLogo = useCallback((dataUrl: string | null) => {
+        saveLogo(dataUrl);
+        setLogoState(dataUrl);
+        setTouchIcon(dataUrl);
+    }, []);
+
+    useEffect(() => {
+        setTouchIcon(loadLogo());
+        const t = window.setTimeout(() => setMinSplashDone(true), SPLASH_MIN_MS);
+        return () => window.clearTimeout(t);
+    }, []);
 
     useEffect(() => {
         applyTheme(theme);
@@ -69,6 +118,16 @@ export default function Root() {
         }
     }, []);
 
+    const syncLogo = useCallback(async () => {
+        try {
+            const r = await api.get('/api/logo');
+            const d = r.data as { data: string | null; mimeType?: string };
+            setLogo(d.data ? `data:${d.mimeType || 'image/png'};base64,${d.data}` : null);
+        } catch {
+            /* sin conexión: se mantiene el logo guardado en el celular */
+        }
+    }, [setLogo]);
+
     useEffect(() => {
         (async () => {
             try {
@@ -80,12 +139,13 @@ export default function Root() {
                 setUserId(u.userId);
                 setAuthState('in');
                 await load(u.userId);
+                void syncLogo();
             } catch (e) {
                 setSignInError(errMsg(e));
                 setAuthState('out');
             }
         })();
-    }, [load]);
+    }, [load, syncLogo]);
 
     const run: Run = useCallback(
         async (p, okMsg) => {
@@ -104,94 +164,138 @@ export default function Root() {
         [userId, notify],
     );
 
-    const toastEl = toast && (
-        <div
-            role={toast.kind === 'error' ? 'alert' : 'status'}
-            className={`fixed left-1/2 top-4 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl px-4 py-3 text-sm font-semibold shadow-lg ${
-                toast.kind === 'error' ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
-            }`}
-        >
-            {toast.text}
-        </div>
+    const ready = authState === 'out' || (authState === 'in' && (dash !== null || loadError !== ''));
+    const showSplash = !(ready && minSplashDone);
+    useEffect(() => {
+        if (showSplash) return;
+        const t = window.setTimeout(() => setSplashGone(true), 400);
+        return () => window.clearTimeout(t);
+    }, [showSplash]);
+
+    const overlays = (
+        <>
+            {/* Franja bajo la barra de estado del iPhone (notch / Dynamic Island). */}
+            <div
+                aria-hidden="true"
+                className="fixed inset-x-0 top-0 z-[70] bg-red-600 dark:bg-zinc-950"
+                style={{ height: 'env(safe-area-inset-top)' }}
+            />
+            {!splashGone && (
+                <div
+                    aria-hidden={!showSplash}
+                    className={`fixed inset-0 z-[80] flex flex-col items-center justify-center gap-5 bg-zinc-50 transition-opacity duration-300 dark:bg-zinc-950 ${
+                        showSplash ? 'opacity-100' : 'pointer-events-none opacity-0'
+                    }`}
+                >
+                    <div className="animate-[pulse_1.6s_ease-in-out_infinite]">
+                        <BrandMark logo={logo} size={120} />
+                    </div>
+                    <div className="text-2xl font-extrabold tracking-tight">Control Moto</div>
+                </div>
+            )}
+            {toast && (
+                <div
+                    role={toast.kind === 'error' ? 'alert' : 'status'}
+                    className={`fixed left-1/2 z-[75] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl px-4 py-3 text-sm font-semibold shadow-lg ${
+                        toast.kind === 'error' ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                    }`}
+                    style={{ top: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
+                >
+                    {toast.text}
+                </div>
+            )}
+        </>
     );
 
+    const safeTop = { paddingTop: 'calc(env(safe-area-inset-top) + 1rem)' };
+
     if (authState === 'loading') {
-        return <div className="flex min-h-screen items-center justify-center text-zinc-500">Cargando…</div>;
+        return <>{overlays}</>;
     }
 
     if (authState === 'out') {
         return (
-            <div className="flex min-h-screen flex-col items-center justify-center gap-6 px-6 text-center">
-                <div className="rounded-3xl bg-red-600 p-5 text-white shadow-lg">
-                    <Bike size={48} />
-                </div>
-                <div>
-                    <h1 className="text-3xl font-extrabold">Control Moto</h1>
-                    <p className="mt-2 max-w-sm text-zinc-600 dark:text-zinc-300">
-                        SOAT, tecnomecánica, mantenimientos y gasolina de tu moto en un solo lugar, con alertas antes de
-                        que se te pase algo.
-                    </p>
-                </div>
-                <Btn
-                    className="w-full max-w-xs"
-                    onClick={async () => {
-                        setSignInError('');
-                        try {
-                            await auth.signInWithRedirect();
-                        } catch (e) {
-                            setSignInError(errMsg(e));
-                        }
-                    }}
+            <>
+                {overlays}
+                <div
+                    className="flex min-h-screen flex-col items-center justify-center gap-6 px-6 text-center"
+                    style={safeTop}
                 >
-                    Iniciar sesión
-                </Btn>
-                {signInError && (
-                    <p role="alert" className="text-sm text-red-600">
-                        {signInError}
-                    </p>
-                )}
-            </div>
+                    <BrandMark logo={logo} size={88} />
+                    <div>
+                        <h1 className="text-3xl font-extrabold">Control Moto</h1>
+                        <p className="mt-2 max-w-sm text-zinc-600 dark:text-zinc-300">
+                            SOAT, tecnomecánica, mantenimientos y gasolina de tu moto en un solo lugar, con alertas antes
+                            de que se te pase algo.
+                        </p>
+                    </div>
+                    <Btn
+                        className="w-full max-w-xs"
+                        onClick={async () => {
+                            setSignInError('');
+                            try {
+                                await auth.signInWithRedirect();
+                            } catch (e) {
+                                setSignInError(errMsg(e));
+                            }
+                        }}
+                    >
+                        Iniciar sesión
+                    </Btn>
+                    {signInError && (
+                        <p role="alert" className="text-sm text-red-600">
+                            {signInError}
+                        </p>
+                    )}
+                </div>
+            </>
         );
     }
 
     if (!dash) {
         return (
-            <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
-                {loadError ? (
-                    <>
-                        <p role="alert" className="text-red-600">
-                            No pude cargar tus datos: {loadError}
-                        </p>
-                        <Btn onClick={() => load(userId)}>Reintentar</Btn>
-                    </>
-                ) : (
-                    <p className="text-zinc-500">Cargando tu moto…</p>
-                )}
-            </div>
+            <>
+                {overlays}
+                <div
+                    className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center"
+                    style={safeTop}
+                >
+                    {loadError ? (
+                        <>
+                            <p role="alert" className="text-red-600">
+                                No pude cargar tus datos: {loadError}
+                            </p>
+                            <Btn onClick={() => load(userId)}>Reintentar</Btn>
+                        </>
+                    ) : (
+                        <p className="text-zinc-500">Cargando tu moto…</p>
+                    )}
+                </div>
+            </>
         );
     }
 
     if (!dash.profile) {
         return (
-            <div className="mx-auto max-w-xl px-4 py-8">
-                {toastEl}
-                <div className="mb-6 flex items-center gap-3">
-                    <div className="rounded-2xl bg-red-600 p-3 text-white">
-                        <Bike size={28} />
+            <>
+                {overlays}
+                <div className="mx-auto max-w-xl px-4 pb-8" style={safeTop}>
+                    <div className="mb-6 mt-4 flex items-center gap-3">
+                        <BrandMark logo={logo} size={52} />
+                        <div>
+                            <h1 className="text-2xl font-extrabold">Registra tu moto</h1>
+                            <p className="text-sm text-zinc-500 dark:text-zinc-400">Solo toma un minuto.</p>
+                        </div>
                     </div>
-                    <div>
-                        <h1 className="text-2xl font-extrabold">Registra tu moto</h1>
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400">Solo toma un minuto.</p>
-                    </div>
+                    <Card>
+                        <ProfileForm
+                            showDocs
+                            submitLabel="Empezar"
+                            onSubmit={(p) => run(api.put('/api/profile', p), '¡Listo! Tu moto quedó registrada')}
+                        />
+                    </Card>
                 </div>
-                <Card>
-                    <ProfileForm
-                        showDocs
-                        submitLabel="Empezar"
-                        onSubmit={(p) => run(api.put('/api/profile', p), '¡Listo! Tu moto quedó registrada')}
-                    />
-                </Card>
-            </div>
+            </>
         );
     }
 
@@ -199,14 +303,23 @@ export default function Root() {
 
     return (
         <div className="min-h-screen pb-24">
-            {toastEl}
-            <header className="sticky top-0 z-40 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
+            {overlays}
+            <header
+                className="sticky top-0 z-40 bg-red-600 text-white shadow-sm dark:border-b dark:border-zinc-800 dark:bg-zinc-950/95 dark:backdrop-blur"
+                style={{ paddingTop: 'env(safe-area-inset-top)' }}
+            >
                 <div className="mx-auto flex max-w-xl items-center justify-between px-4 py-3">
-                    <div className="flex items-center gap-2">
-                        <Bike size={22} className="text-red-600" />
-                        <span className="text-lg font-extrabold">Control Moto</span>
+                    <div className="flex min-w-0 items-center gap-2">
+                        {logo ? (
+                            <img src={logo} alt="Logo" className="h-7 w-7 rounded-lg object-cover" />
+                        ) : (
+                            <Bike size={22} className="dark:text-red-500" />
+                        )}
+                        <span className="truncate text-lg font-extrabold">Control Moto</span>
                     </div>
-                    <span className="text-sm text-zinc-500 dark:text-zinc-400">{TABS.find((t) => t.id === tab)?.label}</span>
+                    <span className="text-sm text-white/80 dark:text-zinc-400">
+                        {TABS.find((t) => t.id === tab)?.label}
+                    </span>
                 </div>
                 {offline && (
                     <div className="flex items-center justify-center gap-2 bg-amber-100 px-4 py-1.5 text-xs font-semibold text-amber-900 dark:bg-amber-950 dark:text-amber-200">
@@ -221,7 +334,15 @@ export default function Root() {
                 {tab === 'maint' && <Maint data={data} run={run} />}
                 {tab === 'fuel' && <Expenses data={data} run={run} />}
                 {tab === 'settings' && (
-                    <Settings data={data} run={run} theme={theme} setTheme={setTheme} notify={notify} />
+                    <Settings
+                        data={data}
+                        run={run}
+                        theme={theme}
+                        setTheme={setTheme}
+                        notify={notify}
+                        logo={logo}
+                        setLogo={setLogo}
+                    />
                 )}
             </main>
 
