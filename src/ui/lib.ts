@@ -99,6 +99,17 @@ export function saveTheme(t: Theme) {
     safeSet('moto-theme', t);
 }
 
+// --- Último precio de la gasolina (para no escribirlo cada vez) ---
+
+export function loadLastPrice(): string | null {
+    const v = safeGet('moto-last-ppg');
+    return v && /^\d+$/.test(v) ? v : null;
+}
+
+export function saveLastPrice(n: number) {
+    safeSet('moto-last-ppg', String(Math.round(n)));
+}
+
 export function applyTheme(t: Theme) {
     const dark =
         t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);

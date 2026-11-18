@@ -10,6 +10,11 @@ import {
     ai,
 } from '@appdeploy/sdk';
 import type { RouterContext } from '@appdeploy/sdk';
+import { createHash, randomBytes } from 'crypto';
+
+function sha256(s: string): string {
+    return createHash('sha256').update(s).digest('hex');
+}
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -29,6 +34,8 @@ type Profile = {
     city: string;
     createdAt: string;
     logoPath?: string;
+    shortcutHash?: string;
+    shortcutCreatedAt?: string;
 };
 
 type Doc = {
@@ -130,6 +137,62 @@ const RECEIPT_SCHEMA = {
     },
     required: ['total', 'category'],
 };
+
+/** Esquema de factura + servicios de taller que coinciden con las tarjetas del usuario. */
+function receiptSchema(itemIds: string[]) {
+    const props: Record<string, unknown> = {
+        ...RECEIPT_SCHEMA.properties,
+        odometer: {
+            type: ['number', 'null'],
+            description: 'Kilometraje de la moto si la factura del taller lo indica',
+        },
+    };
+    if (itemIds.length) {
+        props.maintenance = {
+            type: 'array',
+            description:
+                'Mantenimientos de la lista del usuario que la factura muestra como realizados o comprados. Vacío si no hay ninguno.',
+            items: {
+                type: 'object',
+                properties: {
+                    itemId: { type: 'string', enum: itemIds },
+                    price: { type: ['number', 'null'], description: 'Valor de esa línea en pesos, si aparece' },
+                },
+                required: ['itemId'],
+            },
+        };
+    }
+    return { ...RECEIPT_SCHEMA, properties: props };
+}
+
+function maintPromptList(items: Array<WithId<MaintItem>>): string {
+    return (
+        'Lista de mantenimientos del usuario (id | nombre). Si la factura incluye alguno, devuélvelo en "maintenance" ' +
+        'usando exactamente su id. Ejemplos: aceite → "Aceite de motor"; filtro de aceite → "Filtro de aceite"; ' +
+        'cadena, piñón o corona → "Kit de arrastre"; lubricación de cadena → "Lubricar y tensionar cadena".\n' +
+        items.map((i) => `${i.id} | ${i.name}`).join('\n')
+    );
+}
+
+function validOdometer(n: number | null): number | null {
+    return n !== null && n > 0 && n < 2_000_000 ? Math.round(n) : null;
+}
+
+function parseMaintMatches(raw: unknown, items: Array<WithId<MaintItem>>) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set<string>();
+    const out: Array<{ id: string; name: string; price: number | null }> = [];
+    for (const r of raw) {
+        const o = (r ?? {}) as Record<string, unknown>;
+        const id = typeof o.itemId === 'string' ? o.itemId : '';
+        const item = items.find((i) => i.id === id);
+        if (!item || seen.has(id)) continue;
+        seen.add(id);
+        const price = num(o.price);
+        out.push({ id, name: item.name, price: price !== null && price > 0 ? Math.round(price) : null });
+    }
+    return out;
+}
 
 const VAULT_KINDS = ['SOAT', 'TARJETA', 'LICENCIA', 'RTM', 'OTRO'];
 const VAULT_LABELS: Record<string, string> = {
@@ -1034,13 +1097,15 @@ export const handler = router({
             const data = typeof b.data === 'string' ? b.data : '';
             if (!data) return error('No llegó la foto.', 400);
             if (data.length > VAULT_MAX_BASE64) return error('La foto es muy grande.', 400);
+            const maintItems = await listAll<MaintItem>(tbl('maint', keyOf(ctx)));
             try {
                 const result = await ai.extract({
                     system: 'Lees facturas y recibos de Colombia para una app de gastos de una moto.',
                     prompt:
                         'Extrae los datos de esta factura o recibo. Los valores están en pesos colombianos: el punto separa miles ("$45.000" = 45000). Usa el TOTAL pagado, no subtotales. La fecha va en formato YYYY-MM-DD (en Colombia suele escribirse DD/MM/AAAA). Elige la categoría que mejor describa el gasto de la moto: Gasolina (estaciones de servicio, combustible), Parqueadero, Lavada, Peajes, Accesorios (cascos, guantes, impermeables), Repuestos (taller, aceite, llantas, piezas), Documentos e impuestos (SOAT, RTM, impuesto, trámites), Multas u Otros. Si es gasolina, extrae también los galones y el precio por galón. Si un dato no aparece, usa null.',
                     images: [{ data, mimeType }],
-                    schema: RECEIPT_SCHEMA,
+                    content: maintItems.length ? maintPromptList(maintItems) : undefined,
+                    schema: receiptSchema(maintItems.map((i) => i.id)),
                     maxRetries: 2,
                 });
                 const d = (result.data ?? {}) as Record<string, unknown>;
@@ -1056,6 +1121,8 @@ export const handler = router({
                     gallons: gallons !== null && gallons > 0 && gallons <= 20 ? gallons : null,
                     pricePerGallon: ppg !== null && ppg > 0 ? Math.round(ppg) : null,
                     summary: str(d.summary, 120) || null,
+                    odometer: validOdometer(num(d.odometer)),
+                    maintMatches: parseMaintMatches(d.maintenance, maintItems),
                 });
             } catch (err) {
                 const rpc = err as { statusCode?: number; responseText?: string };
@@ -1218,6 +1285,151 @@ export const handler = router({
                 await db.tx.update('profiles', [{ id: key, record: { logoPath: undefined } }], { patch: true });
             }
             return json({ ok: true });
+        },
+    ],
+
+    'PUT /api/expenses/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const amount = num(b.amount);
+            if (amount === null || amount <= 0) return error('Escribe el valor del gasto.', 400);
+            const category = str(b.category, 40);
+            if (!EXPENSE_CATEGORIES.includes(category)) return error('Elige una categoría válida.', 400);
+            const [ok] = await db.tx.update(
+                tbl('expense', key),
+                [
+                    {
+                        id: ctx.params.id,
+                        record: {
+                            date: isDate(b.date) ? b.date : today(),
+                            category,
+                            amount,
+                            note: str(b.note, 200),
+                        },
+                    },
+                ],
+                { patch: true },
+            );
+            if (!ok) return error('Gasto no encontrado.', 404);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'POST /api/maint/done-batch': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            const km = num(b.km);
+            if (km === null || km < 0) return error('Escribe el kilometraje del servicio.', 400);
+            const date = isDate(b.date) ? b.date : today();
+            const notes = str(b.notes, 300);
+            const raw = Array.isArray(b.items) ? (b.items as unknown[]).slice(0, 20) : [];
+            const all = await listAll<MaintItem>(tbl('maint', key));
+            const chosen: Array<{ item: WithId<MaintItem>; cost: number }> = [];
+            for (const r of raw) {
+                const o = (r ?? {}) as Record<string, unknown>;
+                const item = all.find((i) => i.id === o.id);
+                if (item && !chosen.some((c) => c.item.id === item.id)) {
+                    chosen.push({ item, cost: Math.max(0, num(o.cost) ?? 0) });
+                }
+            }
+            if (!chosen.length) return error('Elige al menos un mantenimiento.', 400);
+            await db.tx.update(
+                tbl('maint', key),
+                chosen.map((c) => ({
+                    id: c.item.id,
+                    record: { lastKm: km, lastDate: date, notifiedFor: undefined },
+                })),
+                { patch: true },
+            );
+            await db.add(
+                tbl('service', key),
+                chosen.map((c) => ({ itemId: c.item.id, itemName: c.item.name, km, date, cost: c.cost, notes })),
+            );
+            await recordKm(key, p, km, date, 'servicio');
+            return dashboardResponse(key);
+        },
+    ],
+
+    'GET /api/shortcut': [
+        requireAuth(),
+        async (ctx) => {
+            const p = await getOne<Profile>('profiles', keyOf(ctx));
+            return json({ enabled: !!p?.shortcutHash, createdAt: p?.shortcutCreatedAt ?? null });
+        },
+    ],
+
+    'POST /api/shortcut': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (!p) return error('Primero registra tu moto.', 400);
+            if (p.shortcutHash) await db.delete('shortcut_tokens', [p.shortcutHash]);
+            const token = `cm_${randomBytes(24).toString('hex')}`;
+            const hash = sha256(token);
+            const createdAt = new Date().toISOString();
+            await db.tx.add('shortcut_tokens', [{ id: hash, key, createdAt }]);
+            await db.tx.update('profiles', [{ id: key, record: { shortcutHash: hash, shortcutCreatedAt: createdAt } }], {
+                patch: true,
+            });
+            return json({ token, createdAt });
+        },
+    ],
+
+    'DELETE /api/shortcut': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const p = await getOne<Profile>('profiles', key);
+            if (p?.shortcutHash) {
+                await db.delete('shortcut_tokens', [p.shortcutHash]);
+                await db.tx.update(
+                    'profiles',
+                    [{ id: key, record: { shortcutHash: undefined, shortcutCreatedAt: undefined } }],
+                    { patch: true },
+                );
+            }
+            return json({ enabled: false });
+        },
+    ],
+
+    // Ruta pública para el Atajo de iOS: se autentica con el token personal.
+    'POST /api/shortcut/km': [
+        async (ctx) => {
+            const b = bodyOf(ctx);
+            const token = str(b.token, 120);
+            if (!token.startsWith('cm_')) return error('Token inválido. Genera uno nuevo en Ajustes.', 401);
+            const hash = sha256(token);
+            const rec = await getOne<{ key: string }>('shortcut_tokens', hash);
+            if (!rec) return error('Token inválido o revocado. Genera uno nuevo en Ajustes.', 401);
+            const p = await getOne<Profile>('profiles', rec.key);
+            if (!p || p.shortcutHash !== hash) return error('Token revocado. Genera uno nuevo en Ajustes.', 401);
+            // Acepta "12345", "12.345" (separador de miles) o un número.
+            let kmRaw: unknown = b.km;
+            if (typeof kmRaw === 'string') {
+                const t = kmRaw.trim().replace(/\s/g, '');
+                kmRaw = /^\d{1,3}(\.\d{3})+$/.test(t) ? t.replace(/\./g, '') : t.replace(',', '.');
+            }
+            const km = num(kmRaw);
+            if (km === null || km < 0) return error('Escribe un kilometraje válido.', 400);
+            if (km < p.currentKm) {
+                return error(
+                    `El kilometraje no puede ser menor al último registrado (${Math.round(p.currentKm)} km).`,
+                    400,
+                );
+            }
+            await recordKm(rec.key, p, km, today(), 'atajo');
+            const delta = Math.round(km - p.currentKm);
+            return json({
+                ok: true,
+                message: `Listo: ${Math.round(km).toLocaleString('es-CO')} km registrados${delta > 0 ? ` (+${delta} km)` : ''}.`,
+            });
         },
     ],
 

@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { api } from '@appdeploy/client';
 import { Trash2 } from 'lucide-react';
 import { Btn, Card, Confirm, Field, SectionTitle, Stat, inputCls } from './components';
-import { fmtDate, fmtKm, fmtMoney, fmtNum, parseNum, todayLocal } from './lib';
+import { fmtDate, fmtKm, fmtMoney, fmtNum, loadLastPrice, parseNum, saveLastPrice, todayLocal } from './lib';
 import type { FuelView, Full, Run } from './types';
 
 export default function FuelPage({ data, run }: { data: Full; run: Run }) {
@@ -13,7 +13,7 @@ export default function FuelPage({ data, run }: { data: Full; run: Run }) {
     const [gallons, setGallons] = useState('');
     const [total, setTotal] = useState('');
     const [price, setPrice] = useState(
-        data.fuelStats.avgPricePerGallon ? String(Math.round(data.fuelStats.avgPricePerGallon)) : '',
+        loadLastPrice() ?? (data.fuelStats.avgPricePerGallon ? String(Math.round(data.fuelStats.avgPricePerGallon)) : ''),
     );
     const [fullTank, setFullTank] = useState(true);
     const [errors, setErrors] = useState<Record<string, string>>({});
@@ -49,6 +49,7 @@ export default function FuelPage({ data, run }: { data: Full; run: Run }) {
         setBusy(false);
         if (ok) {
             setKm('');
+            if (mode === 'pesos' && priceN) saveLastPrice(priceN);
             setGallons('');
             setTotal('');
         }
@@ -150,6 +151,24 @@ export default function FuelPage({ data, run }: { data: Full; run: Run }) {
                         />
                         Llené el tanque
                     </label>
+                    <div className="rounded-xl bg-red-50 p-3 text-sm text-red-900 dark:bg-red-950/40 dark:text-red-100" aria-live="polite">
+                        {mode === 'pesos' ? (
+                            computedGallons ? (
+                                <>
+                                    = <b>{fmtNum(computedGallons, 2)} galones</b> · {fmtNum(computedGallons * 3.78541, 1)} L
+                                </>
+                            ) : (
+                                'Escribe el total pagado y el precio por galón para ver los galones.'
+                            )
+                        ) : parseNum(gallons) && totalN ? (
+                            <>
+                                Precio por galón: <b>{fmtMoney(totalN / parseNum(gallons)!)}</b> ·{' '}
+                                {fmtNum(parseNum(gallons)! * 3.78541, 1)} L
+                            </>
+                        ) : (
+                            'Escribe galones y total para ver el precio por galón.'
+                        )}
+                    </div>
                     <Btn type="submit" disabled={busy} className="w-full">
                         {busy ? 'Guardando…' : 'Guardar tanqueo'}
                     </Btn>

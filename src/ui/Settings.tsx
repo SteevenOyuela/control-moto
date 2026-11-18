@@ -4,6 +4,7 @@ import { Bell, BellRing, LogOut, Monitor, Moon, RefreshCw, Sun } from 'lucide-re
 import { Btn, Card, SectionTitle } from './components';
 import ProfileForm from './ProfileForm';
 import LogoSettings from './LogoSettings';
+import SiriShortcut from './SiriShortcut';
 import { errMsg } from './lib';
 import type { Theme } from './lib';
 import type { Full, Run } from './types';
@@ -107,6 +108,9 @@ export default function Settings({
 
             <SectionTitle>Logo de la app</SectionTitle>
             <LogoSettings logo={logo} setLogo={setLogo} notify={notify} />
+
+            <SectionTitle>Atajo de Siri</SectionTitle>
+            <SiriShortcut notify={notify} />
 
             <SectionTitle>Notificaciones</SectionTitle>
             <Card className="space-y-3">

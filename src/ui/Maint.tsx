@@ -4,6 +4,8 @@ import { api } from '@appdeploy/client';
 import { Check, Pencil, Plus } from 'lucide-react';
 import { Btn, Card, Chip, Confirm, Field, Modal, Progress, SectionTitle, inputCls } from './components';
 import { fmtDate, fmtKm, fmtMoney, parseNum, todayLocal } from './lib';
+import ReceiptScan from './ReceiptScan';
+import FilterChips from './FilterChips';
 import type { Full, ItemView, Run } from './types';
 
 const CATEGORIES = ['Fluidos', 'Filtros y bujía', 'Kit de arrastre', 'Frenos y llantas', 'Sincronización', 'Otros'];
@@ -169,9 +171,24 @@ export default function Maint({ data, run }: { data: Full; run: Run }) {
     const [editing, setEditing] = useState<ItemView | 'new' | null>(null);
     const [deleting, setDeleting] = useState<ItemView | null>(null);
     const currentKm = data.profile.currentKm;
+    const [filter, setFilter] = useState('all');
+    const pendingCount = data.items.filter((i) => i.status !== 'ok').length;
+    const matchesFilter = (i: ItemView) =>
+        filter === 'all' ? true : filter === 'pending' ? i.status !== 'ok' : (i.category || 'Otros') === filter;
+    const filterOptions = [
+        { value: 'all', label: 'Todos', count: data.items.length },
+        { value: 'pending', label: 'Próximos', count: pendingCount },
+        ...CATEGORIES.filter((c) => data.items.some((i) => (i.category || 'Otros') === c)).map((c) => ({
+            value: c,
+            label: c,
+            count: data.items.filter((i) => (i.category || 'Otros') === c).length,
+        })),
+    ];
 
     const groups = CATEGORIES.map((c) => ({ c, items: data.items.filter((i) => (i.category || 'Otros') === c) }))
         .concat([{ c: '', items: data.items.filter((i) => !CATEGORIES.includes(i.category || 'Otros')) }])
+        .filter((g) => g.items.length > 0)
+        .map((g) => ({ ...g, items: g.items.filter(matchesFilter) }))
         .filter((g) => g.items.length > 0);
 
     return (
@@ -180,6 +197,19 @@ export default function Maint({ data, run }: { data: Full; run: Run }) {
                 Intervalos de referencia para la Hunk 160R 4V. Ajústalos según tu manual y tu taller. Esta moto es
                 refrigerada por aire y aceite, así que no lleva líquido refrigerante.
             </p>
+
+            <div className="mt-3">
+                <ReceiptScan data={data} run={run} mode="maint" />
+            </div>
+
+            <div className="mt-3">
+                <FilterChips value={filter} onChange={setFilter} options={filterOptions} />
+            </div>
+            {groups.length === 0 && (
+                <Card className="mt-3">
+                    <p className="text-sm">Nada pendiente por ahora ✅</p>
+                </Card>
+            )}
 
             {groups.map((g) => (
                 <div key={g.c || 'otros'}>
