@@ -40,6 +40,43 @@ export type ItemView = {
     daysLeft: number | null;
     progress: number;
     status: Status;
+    dueLow?: string | null;
+    dueHigh?: string | null;
+};
+
+export type ReadingView = {
+    id: string;
+    date: string;
+    km: number;
+    source: string;
+    verified: boolean;
+    anomaly: boolean;
+};
+
+export type PredictionView = {
+    ready: boolean;
+    confidence: 'sin datos' | 'baja' | 'media' | 'alta';
+    rateAvg: number | null;
+    weekdayRates: number[] | null;
+    sigma: number | null;
+    historyDays: number;
+    readings: number;
+    lastDate: string | null;
+    lastKm: number | null;
+    daysSinceReading: number | null;
+    estimatedKmToday: number | null;
+    series: Array<{ date: string; km: number }>;
+    forecast: Array<{ date: string; mean: number; low: number; high: number }>;
+    anomalies: Array<{ id: string; date: string; km: number; reason: string }>;
+    readingsList: ReadingView[];
+};
+
+export type FuelAlert = {
+    segmentId: string;
+    date: string;
+    lastKmPerGal: number;
+    baseline: number;
+    dropPct: number;
 };
 
 export type ServiceView = {
@@ -124,6 +161,8 @@ export type Full = {
     expenses: ExpenseView[];
     expenseCategories: string[];
     spending: Spending;
+    prediction?: PredictionView;
+    fuelAlert?: FuelAlert | null;
 };
 
 export type Dashboard = Full | { profile: null; today: string };

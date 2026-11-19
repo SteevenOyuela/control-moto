@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api } from '@appdeploy/client';
-import { Bike, Gauge, TrendingUp } from 'lucide-react';
+import { Bike, Gauge } from 'lucide-react';
+import Insights from './Insights';
 import { Btn, Card, Chip, Field, SectionTitle, Stat, inputCls } from './components';
 import { daysText, fmtDate, fmtKm, fmtMoney, fmtNum, parseNum, todayLocal } from './lib';
 import type { Full, Run, Status } from './types';
@@ -114,21 +115,7 @@ export default function Home({ data, run, goTo }: { data: Full; run: Run; goTo: 
                 </form>
             </Card>
 
-            {oil && (
-                <Card className="mt-4">
-                    <div className="flex items-center gap-2 text-sm font-semibold">
-                        <TrendingUp size={16} className="text-red-600" /> Predicción: próximo cambio de aceite
-                    </div>
-                    <div className="mt-2 text-2xl font-bold">
-                        {oil.kmDue !== null ? fmtKm(oil.kmDue) : '—'}
-                    </div>
-                    <div className="text-sm text-zinc-600 dark:text-zinc-300">
-                        {oil.dueDate
-                            ? `Fecha estimada: ${fmtDate(oil.dueDate)}${oil.daysLeft !== null ? ` (${oil.daysLeft <= 0 ? 'ya' : `en ${oil.daysLeft} días`})` : ''}`
-                            : 'Registra el kilometraje en días distintos para que aprenda tu ritmo.'}
-                    </div>
-                </Card>
-            )}
+            <Insights data={data} run={run} oil={oil} />
 
             <SectionTitle>Próximos vencimientos</SectionTitle>
             {upcoming.length === 0 ? (

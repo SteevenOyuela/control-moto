@@ -10,6 +10,8 @@ import {
     ai,
 } from '@appdeploy/sdk';
 import type { RouterContext } from '@appdeploy/sdk';
+import { buildPrediction, dueRange } from './predict';
+import type { Prediction } from './predict';
 import { createHash, randomBytes } from 'crypto';
 
 function sha256(s: string): string {
@@ -36,6 +38,8 @@ type Profile = {
     logoPath?: string;
     shortcutHash?: string;
     shortcutCreatedAt?: string;
+    kmReminderAt?: string;
+    fuelAlertFor?: string;
 };
 
 type Doc = {
@@ -74,7 +78,7 @@ type Fuel = {
     fullTank: boolean;
 };
 
-type Odo = { date: string; km: number; source: string };
+type Odo = { date: string; km: number; source: string; verified?: boolean };
 
 type Expense = {
     date: string;
@@ -548,6 +552,113 @@ function spending(
     };
 }
 
+const MONTHS_SHORT = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+function shortDate(d: string): string {
+    const [, m, dd] = d.split('-').map(Number);
+    return `${dd} ${MONTHS_SHORT[m - 1]}`;
+}
+
+function medianOf(xs: number[]): number {
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/** "en ~5 días (entre 20 nov y 24 nov); el sábado 22 nov es buen momento". */
+function rangeText(mean: string | null, low: string | null, high: string | null, t: string): string {
+    if (!mean) return '';
+    const days = dayNum(mean) - dayNum(t);
+    let s = days <= 0 ? 'ya' : `en ~${days} día${days === 1 ? '' : 's'}`;
+    if (low && high && low !== high) s += ` (entre ${shortDate(low)} y ${shortDate(high)})`;
+    else s += ` (${shortDate(mean)})`;
+    if (days > 1 && days <= 10) {
+        for (let d = 1; d < days; d++) {
+            const day = addDays(t, d);
+            if (new Date(dayNum(day) * 86400000).getUTCDay() === 6) {
+                s += `; el sábado ${shortDate(day)} es buen momento`;
+                break;
+            }
+        }
+    }
+    return s;
+}
+
+/** Recalcula la fecha de un mantenimiento con el modelo (fecha esperada + rango del 80 %). */
+function withPrediction<
+    T extends {
+        kmDue: number | null;
+        timeDue: string | null;
+        dueDate: string | null;
+        daysLeft: number | null;
+        progress: number;
+        status: Status;
+    },
+>(c: T, pred: Prediction, t: string) {
+    const none = { ...c, dueLow: null as string | null, dueHigh: null as string | null };
+    if (c.kmDue === null || !pred.ready) return none;
+    const r = dueRange(pred, c.kmDue);
+    if (!r) return none;
+    let dueDate = r.mean;
+    let dueLow: string | null = r.low;
+    let dueHigh: string | null = r.high;
+    if (c.timeDue && dayNum(c.timeDue) < dayNum(dueDate)) {
+        dueDate = c.timeDue;
+        dueLow = null;
+        dueHigh = null;
+    }
+    const daysLeft = dayNum(dueDate) - dayNum(t);
+    let status: Status = c.status;
+    if (status === 'ok' && daysLeft <= 7) status = 'pronto';
+    else if (status === 'pronto' && c.progress < 0.85 && daysLeft > 7) status = 'ok';
+    return { ...c, dueDate, daysLeft, status, dueLow, dueHigh };
+}
+
+function publicPrediction(pred: Prediction, odo: Array<WithId<Odo>>) {
+    const flagged = new Set(pred.anomalies.map((a) => a.id));
+    return {
+        ...pred,
+        forecast: pred.forecast.slice(0, 120),
+        readingsList: [...odo]
+            .filter((o) => isDate(o.date) && Number.isFinite(o.km))
+            .sort((a, b) => dayNum(b.date) - dayNum(a.date) || b.km - a.km)
+            .slice(0, 25)
+            .map((o) => ({
+                id: o.id,
+                date: o.date,
+                km: o.km,
+                source: o.source,
+                verified: !!o.verified,
+                anomaly: flagged.has(o.id),
+            })),
+    };
+}
+
+/** Alerta si el último tanque lleno rindió ≥15 % menos que la mediana de los anteriores. */
+function fuelAlert(fuel: Array<WithId<Fuel>>) {
+    const sorted = [...fuel].sort((a, b) => a.km - b.km || dayNum(a.date) - dayNum(b.date));
+    const segs: Array<{ id: string; date: string; kpg: number }> = [];
+    let lastFull = -1;
+    let gal = 0;
+    sorted.forEach((f, i) => {
+        if (lastFull >= 0) gal += f.gallons;
+        if (f.fullTank) {
+            if (lastFull >= 0) {
+                const km = f.km - sorted[lastFull].km;
+                if (km > 0 && gal > 0) segs.push({ id: f.id, date: f.date, kpg: km / gal });
+            }
+            lastFull = i;
+            gal = 0;
+        }
+    });
+    if (segs.length < 4) return null;
+    const last = segs[segs.length - 1];
+    const baseline = medianOf(segs.slice(-7, -1).map((s) => s.kpg));
+    const dropPct = 1 - last.kpg / baseline;
+    if (!(baseline > 0) || dropPct < 0.15) return null;
+    return { segmentId: last.id, date: last.date, lastKmPerGal: last.kpg, baseline, dropPct };
+}
+
 const STATUS_ORDER: Record<Status, number> = { vencido: 0, urgente: 1, pronto: 2, ok: 3 };
 
 async function buildDashboard(key: string, profile: Profile) {
@@ -560,7 +671,8 @@ async function buildDashboard(key: string, profile: Profile) {
         listAll<Odo>(tbl('odo', key)),
         listAll<Expense>(tbl('expense', key)),
     ]);
-    const rate = dailyRate(odo, t);
+    const pred = buildPrediction(odo, t);
+    const rate = pred.ready ? pred.rateAvg : dailyRate(odo, t);
     const estimatedKmToday = rate
         ? Math.round(profile.currentKm + rate * Math.max(0, dayNum(t) - dayNum(profile.currentKmDate)))
         : null;
@@ -583,7 +695,7 @@ async function buildDashboard(key: string, profile: Profile) {
 
     const itemViews = items
         .map((i) => {
-            const c = computeItem(i, profile, rate, t);
+            const c = withPrediction(computeItem(i, profile, rate, t), pred, t);
             return {
                 id: c.id,
                 name: c.name,
@@ -599,6 +711,8 @@ async function buildDashboard(key: string, profile: Profile) {
                 daysLeft: c.daysLeft,
                 progress: c.progress,
                 status: c.status,
+                dueLow: c.dueLow,
+                dueHigh: c.dueHigh,
             };
         })
         .sort(
@@ -621,7 +735,7 @@ async function buildDashboard(key: string, profile: Profile) {
         profile,
         today: t,
         rate,
-        estimatedKmToday,
+        estimatedKmToday: pred.estimatedKmToday ?? estimatedKmToday,
         rtmSuggested: isDate(profile.matriculaDate) ? estimateRtm(profile.matriculaDate, t) : null,
         tax: taxInfo(profile),
         docs: docViews,
@@ -635,6 +749,8 @@ async function buildDashboard(key: string, profile: Profile) {
             .map((e) => ({ id: e.id, date: e.date, category: e.category, amount: e.amount, note: e.note ?? '' })),
         expenseCategories: EXPENSE_CATEGORIES,
         spending: spending(fuel, services, expenses, odo, profile, t),
+        prediction: publicPrediction(pred, odo),
+        fuelAlert: fuelAlert(fuel),
     };
 }
 
@@ -732,9 +848,30 @@ async function remindUser(key: string, profile: Profile): Promise<string[]> {
         if (it.kmLeft !== null) {
             detail = it.kmLeft > 0 ? `faltan ${Math.round(it.kmLeft)} km` : `pasado por ${Math.round(-it.kmLeft)} km`;
         }
-        if (it.dueDate) detail += `${detail ? ', ' : ''}fecha estimada ${it.dueDate}`;
+        if (it.dueDate) detail += `${detail ? ', ' : ''}${rangeText(it.dueDate, it.dueLow, it.dueHigh, dash.today)}`;
         messages.push(`${it.name}: ${it.status === 'vencido' ? 'toca ya' : 'se acerca'}${detail ? ` (${detail})` : ''}.`);
         await db.tx.update(tbl('maint', key), [{ id: it.id, record: { notifiedFor: mark } }], { patch: true });
+    }
+
+    // Recordatorio para registrar el kilometraje (cada 4 días sin lecturas).
+    const since = dash.prediction.daysSinceReading;
+    if (since !== null && since >= 4) {
+        const lastRem = profile.kmReminderAt;
+        if (!lastRem || dayNum(dash.today) - dayNum(lastRem) >= 4) {
+            messages.push(
+                `Llevas ${since} días sin registrar el kilometraje. Actualízalo para que las predicciones sigan siendo precisas.`,
+            );
+            await db.tx.update('profiles', [{ id: key, record: { kmReminderAt: dash.today } }], { patch: true });
+        }
+    }
+
+    // Consumo anormal de gasolina.
+    const fa = dash.fuelAlert;
+    if (fa && profile.fuelAlertFor !== fa.segmentId) {
+        messages.push(
+            `Tu consumo bajó a ${fa.lastKmPerGal.toFixed(0)} km/gal (${Math.round(fa.dropPct * 100)} % menos que tu promedio de ${fa.baseline.toFixed(0)}). Revisa la tensión de la cadena, la presión de las llantas y el filtro de aire.`,
+        );
+        await db.tx.update('profiles', [{ id: key, record: { fuelAlertFor: fa.segmentId } }], { patch: true });
     }
 
     if (messages.length > 0) {
@@ -1430,6 +1567,37 @@ export const handler = router({
                 ok: true,
                 message: `Listo: ${Math.round(km).toLocaleString('es-CO')} km registrados${delta > 0 ? ` (+${delta} km)` : ''}.`,
             });
+        },
+    ],
+
+    'POST /api/odometer/:id/verify': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const [ok] = await db.tx.update(tbl('odo', key), [{ id: ctx.params.id, record: { verified: true } }], {
+                patch: true,
+            });
+            if (!ok) return error('Lectura no encontrada.', 404);
+            return dashboardResponse(key);
+        },
+    ],
+
+    'DELETE /api/odometer/:id': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            await db.delete(tbl('odo', key), [ctx.params.id]);
+            // Recalcula el km actual con la lectura más alta que quede.
+            const rest = (await listAll<Odo>(tbl('odo', key))).filter((o) => isDate(o.date) && Number.isFinite(o.km));
+            if (rest.length) {
+                const top = rest.reduce((a, b) => (b.km > a.km || (b.km === a.km && b.date > a.date) ? b : a));
+                await db.tx.update(
+                    'profiles',
+                    [{ id: key, record: { currentKm: top.km, currentKmDate: top.date } }],
+                    { patch: true },
+                );
+            }
+            return dashboardResponse(key);
         },
     ],
 
