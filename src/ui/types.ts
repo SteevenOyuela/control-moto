@@ -144,6 +144,7 @@ export type VaultItem = {
     mimeType: string;
     bytes: number;
     createdAt: string;
+    pages?: number;
 };
 
 export type Full = {

@@ -87,7 +87,10 @@ type Expense = {
     note?: string;
 };
 
+type VaultPage = { path: string; mimeType: string; bytes: number };
+
 type VaultItem = {
+    pages?: VaultPage[];
     kind: string;
     title: string;
     path: string;
@@ -754,6 +757,13 @@ async function buildDashboard(key: string, profile: Profile) {
     };
 }
 
+/** Páginas del documento (los documentos antiguos tienen una sola). */
+function pagesOf(item: VaultItem): VaultPage[] {
+    return item.pages?.length ? item.pages : [{ path: item.path, mimeType: item.mimeType, bytes: item.bytes }];
+}
+
+const VAULT_MAX_PAGES = 10;
+
 async function vaultList(key: string) {
     const items = await listAll<VaultItem>(tbl('vault', key));
     return items
@@ -764,8 +774,21 @@ async function vaultList(key: string) {
             mimeType: v.mimeType,
             bytes: v.bytes,
             createdAt: v.createdAt,
+            pages: pagesOf(v).length,
         }))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+/** Hasta 2 páginas extra (p. ej. el reverso) para que la IA lea todo el documento. */
+async function extraPages(item: VaultItem) {
+    const rest = pagesOf(item)
+        .slice(1, 3)
+        .filter((pg) => pg.mimeType.startsWith('image/'));
+    if (!rest.length) return [];
+    const files = await storage.read(rest.map((pg) => pg.path));
+    return files
+        .map((f, i) => (f.content ? { data: f.content, mimeType: rest[i].mimeType } : null))
+        .filter((x): x is { data: string; mimeType: string } => x !== null);
 }
 
 const EXTRACT_SCHEMA = {
@@ -1328,13 +1351,93 @@ export const handler = router({
         },
     ],
 
+    'GET /api/vault/:id/pages/:n': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (!item) return error('Archivo no encontrado.', 404);
+            const page = pagesOf(item)[Number(ctx.params.n)];
+            if (!page) return error('Página no encontrada.', 404);
+            const [file] = await storage.read([page.path]);
+            if (!file || file.content === null) return error('Archivo no encontrado.', 404);
+            return json({ data: file.content, mimeType: page.mimeType });
+        },
+    ],
+
+    'POST /api/vault/:id/pages': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const b = bodyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (!item) return error('Documento no encontrado.', 404);
+            const pages = pagesOf(item);
+            if (!pages[0].mimeType.startsWith('image/')) {
+                return error('A un PDF no se le pueden agregar páginas. Escanéalo como fotos.', 400);
+            }
+            if (pages.length >= VAULT_MAX_PAGES) return error(`Máximo ${VAULT_MAX_PAGES} páginas por documento.`, 400);
+            const mimeType = str(b.mimeType, 40);
+            const ext = VAULT_MIME[mimeType];
+            if (!ext || !mimeType.startsWith('image/')) return error('Las páginas deben ser fotos.', 400);
+            const data = typeof b.data === 'string' ? b.data : '';
+            if (!data) return error('No llegó la foto.', 400);
+            if (data.length > VAULT_MAX_BASE64) return error('La foto es muy grande (máximo 3,5 MB).', 400);
+            const path = `vault/${key}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+            const [ok] = await storage.write([{ path, content: data, contentType: mimeType }]);
+            if (!ok) return error('No se pudo guardar la página. Intenta de nuevo.', 500);
+            const next = [...pages, { path, mimeType, bytes: Math.round((data.length * 3) / 4) }];
+            const [saved] = await db.tx.update(
+                tbl('vault', key),
+                [{ id: ctx.params.id, record: { pages: next, bytes: next.reduce((t, pg) => t + pg.bytes, 0) } }],
+                { patch: true },
+            );
+            if (!saved) {
+                await storage.delete([path]);
+                return error('No se pudo agregar la página.', 500);
+            }
+            return json({ pages: next.length, items: await vaultList(key) });
+        },
+    ],
+
+    'DELETE /api/vault/:id/pages/:n': [
+        requireAuth(),
+        async (ctx) => {
+            const key = keyOf(ctx);
+            const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
+            if (!item) return error('Documento no encontrado.', 404);
+            const pages = pagesOf(item);
+            const n = Number(ctx.params.n);
+            if (!pages[n]) return error('Página no encontrada.', 404);
+            if (pages.length === 1) return error('Es la única página: elimina el documento completo.', 400);
+            const next = pages.filter((_, i) => i !== n);
+            await db.tx.update(
+                tbl('vault', key),
+                [
+                    {
+                        id: ctx.params.id,
+                        record: {
+                            pages: next,
+                            path: next[0].path,
+                            mimeType: next[0].mimeType,
+                            bytes: next.reduce((t, pg) => t + pg.bytes, 0),
+                        },
+                    },
+                ],
+                { patch: true },
+            );
+            await storage.delete([pages[n].path]);
+            return json({ pages: next.length, items: await vaultList(key) });
+        },
+    ],
+
     'DELETE /api/vault/:id': [
         requireAuth(),
         async (ctx) => {
             const key = keyOf(ctx);
             const item = await getOne<VaultItem>(tbl('vault', key), ctx.params.id);
             if (item) {
-                await storage.delete([item.path]);
+                await storage.delete(pagesOf(item).map((pg) => pg.path));
                 await db.delete(tbl('vault', key), [ctx.params.id]);
             }
             return json({ items: await vaultList(key) });
@@ -1358,7 +1461,7 @@ export const handler = router({
                         'Eres un asistente que lee documentos de tránsito de Colombia (SOAT, revisión técnico-mecánica, licencia de conducción, tarjeta de propiedad).',
                     prompt:
                         'Lee el documento de la imagen y devuelve el tipo de documento y sus fechas en formato YYYY-MM-DD. Las fechas en Colombia suelen escribirse DD/MM/AAAA. Para el SOAT la fecha de vencimiento es el fin de vigencia. Si un dato no aparece, usa null.',
-                    images: [{ data: file.content, mimeType: item.mimeType }],
+                    images: [{ data: file.content, mimeType: item.mimeType }, ...(await extraPages(item))],
                     schema: EXTRACT_SCHEMA,
                     maxRetries: 2,
                 });

@@ -43,6 +43,20 @@ export const deleteFile = (id: string) => run(FILES, 'readwrite', (s) => s.delet
 export const putMeta = (userId: string, items: VaultItem[]) => run(META, 'readwrite', (s) => s.put(items, userId));
 export const getMeta = (userId: string) => run<VaultItem[]>(META, 'readonly', (s) => s.get(userId));
 
+// Páginas: clave "id:n". Los documentos antiguos guardaron la única página con la clave "id".
+export const putPage = (id: string, n: number, blob: Blob) => putFile(`${id}:${n}`, blob);
+
+export async function getPage(id: string, n: number): Promise<Blob | null> {
+    const b = await getFile(`${id}:${n}`);
+    if (b || n !== 0) return b;
+    return getFile(id);
+}
+
+export async function deletePages(id: string, count: number) {
+    await deleteFile(id);
+    for (let n = 0; n < Math.max(count, 1) + 1; n++) await deleteFile(`${id}:${n}`);
+}
+
 export function base64ToBlob(data: string, mimeType: string): Blob {
     const bin = atob(data);
     const bytes = new Uint8Array(bin.length);
